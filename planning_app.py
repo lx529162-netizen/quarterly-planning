@@ -2,54 +2,55 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import gspread
-import json
 from oauth2client.service_account import ServiceAccountCredentials
-import os
 
+# 1. Настройка страницы
 st.set_page_config(page_title="Quarterly Planning", layout="wide")
 
-# --- Подключение к Google Sheets ---
+# --- ПОДКЛЮЧЕНИЕ (Специально для share.streamlit.io) ---
 def get_google_sheet():
     try:
-        json_key = os.environ.get("GCP_KEY")
-        if not json_key:
-            st.error("❌ ОШИБКА: Ключ не найден в Secrets.")
+        # Используем st.secrets, так как мы на Streamlit Cloud
+        if "gcp_service_account" not in st.secrets:
+            st.error("❌ Не найден раздел [gcp_service_account] в Secrets.")
             st.stop()
-        
-        creds_dict = json.loads(json_key)
+            
+        creds_dict = dict(st.secrets["gcp_service_account"])
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
+        # Открываем таблицу
         return client.open("Quarterly Planning Data").sheet1
     except Exception as e:
-        st.error(f"Ошибка соединения: {e}")
+        st.error(f"❌ Ошибка подключения: {e}")
         st.stop()
 
+# --- ЧТЕНИЕ ДАННЫХ (Умный метод, не боится пустых колонок) ---
 def load_data():
     sheet = get_google_sheet()
     
-    # ИСПОЛЬЗУЕМ НОВЫЙ МЕТОД ЧТЕНИЯ
-    # get_all_values() не ломается от пустых колонок
+    # Читаем "сырые" данные, чтобы не было ошибки Duplicates
     raw_data = sheet.get_all_values()
     
     expected_cols = ['Task Name', 'Requester', 'Executor', 'Stream', 'Priority', 'Estimate (MD)', 'Type']
     
-    # Если таблица пустая (нет даже заголовков)
+    # Если таблица пустая
     if not raw_data:
         return pd.DataFrame(columns=expected_cols)
 
-    # Берем заголовки из первой строки
+    # Первая строка - это заголовки
     headers = raw_data[0]
-    # Берем данные со второй строки
+    # Остальные строки - данные
     data = raw_data[1:] if len(raw_data) > 1 else []
     
     # Создаем DataFrame
     df = pd.DataFrame(data, columns=headers)
     
-    # Оставляем только нужные нам колонки (отбрасываем пустые хвосты)
-    # Если какой-то колонки нет - добавляем
+    # Оставляем только нужные колонки (игнорируем мусор справа)
     final_df = pd.DataFrame()
     for col in expected_cols:
+        # Если колонка есть в таблице - берем её, если нет - создаем пустую
         if col in df.columns:
             final_df[col] = df[col]
         else:
@@ -62,17 +63,17 @@ def save_new_row(row_df):
     row_list = row_df.values.tolist()[0]
     sheet.append_row(row_list)
 
-# --- Интерфейс ---
-st.title("📊 Team Planning Tool")
+# --- ИНТЕРФЕЙС ---
+st.title("📊 Quarterly Planning Tool")
 
 if st.button("🔄 Обновить данные"):
     st.rerun()
 
-# Загружаем данные (теперь безопасно)
+# Загружаем данные
 try:
     df_tasks = load_data()
 except Exception as e:
-    st.error(f"Ошибка данных: {e}")
+    st.error(f"Ошибка чтения данных: {e}")
     df_tasks = pd.DataFrame()
 
 # Константы
@@ -117,7 +118,7 @@ with st.form("add_task_form", clear_on_submit=True):
 if not df_tasks.empty:
     st.divider()
     
-    # Превращаем текст в числа (на всякий случай)
+    # Чистим данные (превращаем текст в числа)
     df_tasks['Estimate (MD)'] = pd.to_numeric(df_tasks['Estimate (MD)'], errors='coerce').fillna(0)
     
     cap_data = [{'Executor': d, 'Total Capacity': s['people']*s['days']} for d, s in st.session_state.capacity_settings.items()]
