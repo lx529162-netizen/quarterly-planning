@@ -29,14 +29,14 @@ def load_data():
     sheet = get_google_sheet()
     raw_data = sheet.get_all_values()
     
-    # Заголовки таблицы
-    expected_cols = ['Task Name', 'Description', 'Requester', 'Executor', 'Stream', 'Priority', 'Estimate (SP)', 'Type']
+    # Обновленные заголовки (Client вместо Stream)
+    expected_cols = ['Task Name', 'Description', 'Requester', 'Executor', 'Client', 'Priority', 'Estimate (SP)', 'Type']
     
     if not raw_data:
         sheet.append_row(expected_cols)
         return pd.DataFrame(columns=expected_cols)
 
-    # Если заголовки старые - обновляем
+    # Обновление шапки, если она старая (или поменялась структура)
     if raw_data[0] != expected_cols:
         sheet.update(range_name='A1:H1', values=[expected_cols])
         raw_data = sheet.get_all_values()
@@ -62,17 +62,19 @@ if st.button("🔄 Обновить данные"):
     st.rerun()
 
 # --- КОНСТАНТЫ ---
-# Ваш актуальный список команд
 DEPARTMENTS = ["Data Platform", "BI", "ML", "DA", "DE", "Data Ops", "WAS"]
-STREAMS = ["Betting", "Casino", "CDP"]
+
+# Новый список Заказчиков (бывшие Стримы)
+CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casino", "Finance Core"]
+
 PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
 SP_OPTIONS = [1, 2, 3, 5, 8]
 
-# Настройки капасити (по умолчанию)
+# Настройки капасити
 if 'capacity_settings' not in st.session_state:
     st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21} for dept in DEPARTMENTS}
 
-# --- САЙДБАР (Настройки людей и дней) ---
+# --- САЙДБАР ---
 st.sidebar.header("⚙️ Ресурсы команд")
 st.sidebar.info("1 SP = 1 Человеко-день")
 for dept in DEPARTMENTS:
@@ -81,19 +83,20 @@ for dept in DEPARTMENTS:
         d = st.number_input(f"{dept}: Дней", 1, 60, 21, key=f"d_{dept}")
         st.session_state.capacity_settings[dept] = {'people': p, 'days': d}
 
-# --- ФОРМА СОЗДАНИЯ ЗАДАЧИ ---
+# --- ФОРМА ---
 st.subheader("➕ Создание задачи")
 
 with st.form("main_form", clear_on_submit=True):
-    # 1. Основные параметры
+    # 1. Чья задача
     main_team = st.selectbox("Чья задача? (Кто исполнитель)", DEPARTMENTS)
     
     task_name = st.text_input("Название задачи", placeholder="Краткая суть...")
     description = st.text_area("Описание задачи", placeholder="Детали, DoD...", height=100)
     
-    col_str, col_prio, col_sp = st.columns(3)
-    with col_str:
-        stream = st.selectbox("Стрим", STREAMS)
+    col_client, col_prio, col_sp = st.columns(3)
+    with col_client:
+        # Теперь здесь выбираем Заказчика (ex-Stream)
+        client = st.selectbox("Заказчик", CLIENTS)
     with col_prio:
         priority = st.selectbox("Приоритет", PRIORITIES)
     with col_sp:
@@ -101,20 +104,16 @@ with st.form("main_form", clear_on_submit=True):
 
     st.markdown("---")
     
-    # --- БЛОКЕР (ЗАВИСИМОСТЬ) ---
+    # --- БЛОКЕР ---
     st.markdown("### 🧱 Добавить задачу блокер")
     st.caption("Если вы зависите от другой команды, выберите её ниже.")
     
-    # Выбор команды для блокера
     blocker_team = st.selectbox("На какую команду ставим блокер?", ["(Нет блокера)"] + DEPARTMENTS)
     
-    # Поля для блокера
     blocker_name = st.text_input("Название задачи-блокера")
     blocker_desc = st.text_area("Описание требований к блокеру", height=68)
     
-    # ДИНАМИЧЕСКОЕ СООБЩЕНИЕ
     if blocker_team != "(Нет блокера)":
-        # Вот здесь подставляется имя выбранной команды
         st.info(f"ℹ️ Оценка (SP) для блокера будет пустой. Команда **{blocker_team}** должна оценить её сама в таблице. Приоритет будет унаследован ({priority}).")
 
     submitted = st.form_submit_button("Сохранить задачу")
@@ -125,32 +124,32 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            # 1. Формируем строку ОСНОВНОЙ задачи
+            # 1. ОСНОВНАЯ ЗАДАЧА
             row_main = pd.DataFrame([{
                 'Task Name': task_name,
                 'Description': description,
                 'Requester': main_team,
                 'Executor': main_team,
-                'Stream': stream,
+                'Client': client,       # Используем переменную client
                 'Priority': priority,
                 'Estimate (SP)': estimate,
                 'Type': 'Own Task'
             }])
             rows_to_save.append(row_main)
             
-            # 2. Формируем строку БЛОКЕРА (если выбран)
+            # 2. БЛОКЕР (Если есть)
             if blocker_team != "(Нет блокера)" and blocker_team != main_team:
                 if not blocker_name:
-                    st.warning("Вы выбрали команду для блокера, но не написали название задачи. Блокер не создан.")
+                    st.warning("Название блокера не заполнено, он не будет создан.")
                 else:
                     row_blocker = pd.DataFrame([{
                         'Task Name': blocker_name,
                         'Description': blocker_desc,
-                        'Requester': main_team,     # Заказчик - мы
+                        'Requester': main_team,     # Заказчик - текущая команда
                         'Executor': blocker_team,   # Исполнитель - кого выбрали
-                        'Stream': stream,           # Тот же стрим
+                        'Client': client,           # Тот же клиент
                         'Priority': priority,       # Тот же приоритет
-                        'Estimate (SP)': "",        # Оценка пустая!
+                        'Estimate (SP)': "",        # Оценка пустая
                         'Type': 'Incoming Blocker'
                     }])
                     rows_to_save.append(row_blocker)
@@ -170,19 +169,17 @@ except Exception as e:
 if not df_tasks.empty:
     st.divider()
     
-    # Превращаем SP в числа (пустые строки -> 0)
+    # Превращаем SP в числа
     df_tasks['Estimate (SP)'] = pd.to_numeric(df_tasks['Estimate (SP)'], errors='coerce').fillna(0)
     
     cap_data = [{'Executor': d, 'Total Capacity': s['people']*s['days']} for d, s in st.session_state.capacity_settings.items()]
     df_cap = pd.DataFrame(cap_data)
     
-    # Группируем данные для графика
     usage = df_tasks.groupby(['Executor', 'Type'])['Estimate (SP)'].sum().reset_index()
     
     st.subheader("📊 Загрузка команд (SP)")
     
     fig = go.Figure()
-    # 1. Серая подложка (Total Capacity)
     fig.add_trace(go.Bar(
         x=df_cap['Executor'], 
         y=df_cap['Total Capacity'], 
@@ -190,7 +187,6 @@ if not df_tasks.empty:
         marker_color='lightgrey'
     ))
     
-    # 2. Цветные бары (Задачи и Блокеры)
     for t in ['Own Task', 'Incoming Blocker']:
         sub = usage[usage['Type'] == t]
         if not sub.empty:
