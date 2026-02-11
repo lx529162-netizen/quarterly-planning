@@ -8,7 +8,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(page_title="Quarterly Planning", layout="wide")
 
 # --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
-def get_google_sheet():
+def get_client():
     try:
         if "gcp_service_account" not in st.secrets:
             st.error("❌ Не найден раздел [gcp_service_account] в Secrets.")
@@ -19,14 +19,74 @@ def get_google_sheet():
         
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        return client.open("Quarterly Planning Data").sheet1
+        return client
     except Exception as e:
         st.error(f"❌ Ошибка подключения: {e}")
         st.stop()
 
+def get_main_sheet():
+    client = get_client()
+    return client.open("Quarterly Planning Data").sheet1
+
+# --- НОВАЯ ФУНКЦИЯ: СИНХРОНИЗАЦИЯ С JIRA CSV ---
+def sync_jira_sheet(df_source):
+    if df_source.empty:
+        return
+
+    client = get_client()
+    sh = client.open("Quarterly Planning Data")
+    
+    # 1. Получаем или создаем лист "csv"
+    try:
+        ws_csv = sh.worksheet("csv")
+    except:
+        ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
+
+    # 2. Подготовка данных для Jira
+    # Jira требует специфические заголовки: Summary, Description, Priority, etc.
+    df_jira = pd.DataFrame()
+
+    # MAPPING (Сопоставление полей)
+    df_jira['Summary'] = df_source['Task Name']
+    
+    # Описание: добавляем в него исходного заказчика и стрим, чтобы не потерялось
+    df_jira['Description'] = df_source['Description'] + "\n\n" + \
+                             "--- Planning Info ---\n" + \
+                             "Internal Requester: " + df_source['Requester'] + "\n" + \
+                             "Planning Type: " + df_source['Type']
+
+    # Приоритеты Jira (Mapping)
+    priority_map = {
+        "P0 (Critical)": "Highest",
+        "P1 (High)": "High",
+        "P2 (Medium)": "Medium",
+        "P3 (Low)": "Low"
+    }
+    df_jira['Priority'] = df_source['Priority'].map(priority_map).fillna("Medium")
+
+    # Story Points
+    df_jira['Story Points'] = pd.to_numeric(df_source['Estimate (SP)'], errors='coerce').fillna(0)
+
+    # Issue Type (По умолчанию Story)
+    df_jira['Issue Type'] = "Story"
+
+    # Labels (Метки). Превращаем Client в метку без пробелов (напр. Global_Admin_Panel)
+    # Также добавляем метку квартального планирования
+    df_jira['Labels'] = df_source['Client'].str.replace(" ", "_") + ", Q_Planning"
+
+    # Assignee (Исполнитель) - в Jira это обычно логин, но пока пишем название команды
+    # Чтобы потом при импорте сопоставить
+    df_jira['Component'] = df_source['Executor'] 
+
+    # 3. Запись в лист csv
+    ws_csv.clear()
+    # set_dataframe требует gspread-dataframe, но мы сделаем по-простому через списки
+    ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
+
+
 # --- ЧТЕНИЕ ДАННЫХ ---
 def load_data():
-    sheet = get_google_sheet()
+    sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
     expected_cols = ['Task Name', 'Description', 'Requester', 'Executor', 'Client', 'Priority', 'Estimate (SP)', 'Type']
@@ -47,47 +107,43 @@ def load_data():
 
 # --- СОХРАНЕНИЕ ---
 def save_rows(rows_list):
-    sheet = get_google_sheet()
+    sheet = get_main_sheet()
     values_to_append = []
     for row_df in rows_list:
         values_to_append.append(row_df.values.tolist()[0])
     sheet.append_rows(values_to_append)
+    
+    # ПОСЛЕ СОХРАНЕНИЯ - ОБНОВЛЯЕМ JIRA ЛИСТ
+    # Читаем обновленные данные
+    all_data = load_data() 
+    sync_jira_sheet(all_data)
 
-# --- НОВАЯ ФУНКЦИЯ: ПОНИЖЕНИЕ ПРИОРИТЕТА ---
+
+# --- ПОНИЖЕНИЕ ПРИОРИТЕТА ---
 def downgrade_existing_p0(executor_team):
-    sheet = get_google_sheet()
-    # Читаем все данные, чтобы найти нужную строку
+    sheet = get_main_sheet()
     all_values = sheet.get_all_values()
     
-    # Перебираем строки (начиная со 2-й, т.к. 1-я это заголовки)
-    # Индекс i в enumerate будет 0 для первой строки данных (которая в таблице строка №2)
-    # Нам нужно найти строку, где Executor == executor_team И Priority == P0 (Critical) И Type == Own Task
-    
-    # Колонки (индексы начинаются с 0):
-    # 0: Task Name, 1: Desc, 2: Req, 3: Exec, 4: Client, 5: Priority, 6: SP, 7: Type
-    
     for i, row in enumerate(all_values):
-        if i == 0: continue # Пропускаем заголовок
-        
-        # Проверяем условия
+        if i == 0: continue
+        # row indices: 3=Executor, 5=Priority, 7=Type
         if (len(row) > 7 and 
             row[3] == executor_team and 
             row[5] == "P0 (Critical)" and 
             row[7] == "Own Task"):
             
-            # Нашли! Строка в Google Sheets = i + 1 (так как нумерация с 1)
             row_number = i + 1
-            
-            # Обновляем ячейку Приоритета (Колонка F = 6)
             sheet.update_cell(row_number, 6, "P1 (High)")
-            return True # Успешно понизили
-            
-    return False # Не нашли (на всякий случай)
+            return True
+    return False
 
 # --- ИНТЕРФЕЙС ---
 st.title("📊 Quarterly Planning Tool")
 
 if st.button("🔄 Обновить данные"):
+    # При ручном обновлении тоже синхронизируем лист csv, на всякий случай
+    df = load_data()
+    sync_jira_sheet(df)
     st.rerun()
 
 # --- КОНСТАНТЫ ---
@@ -99,14 +155,11 @@ SP_OPTIONS = [1, 2, 3, 5, 8]
 if 'capacity_settings' not in st.session_state:
     st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21} for dept in DEPARTMENTS}
 
-# --- ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ КОНФЛИКТА ---
+# --- КОНФЛИКТ P0 ---
 if 'p0_conflict' not in st.session_state:
     st.session_state.p0_conflict = False
-    st.session_state.pending_rows = [] # Здесь будем хранить задачу, пока юзер думает
+    st.session_state.pending_rows = []
 
-# ==========================================
-# БЛОК РАЗРЕШЕНИЯ КОНФЛИКТА (Появляется при P0)
-# ==========================================
 if st.session_state.p0_conflict:
     st.warning(f"⚠️ **Внимание!** У команды уже есть задача с приоритетом P0 (Critical).")
     st.write("Может быть только 1 крит в плане.")
@@ -116,43 +169,27 @@ if st.session_state.p0_conflict:
     
     with col_yes:
         if st.button("ДА, понизить старый до P1, новый записать как P0"):
-            # 1. Понижаем старый в таблице
             executor = st.session_state.pending_rows[0]['Executor'].iloc[0]
             downgrade_existing_p0(executor)
-            
-            # 2. Сохраняем новый как есть (он уже P0)
             save_rows(st.session_state.pending_rows)
-            
             st.success("Готово! Старый крит стал P1, новый записан как P0.")
-            # Сброс состояния
             st.session_state.p0_conflict = False
             st.session_state.pending_rows = []
             st.rerun()
 
     with col_no:
         if st.button("НЕТ, не трогать старый, новый записать как P1"):
-            # 1. Берем новую задачу и насильно меняем ей приоритет на P1
             rows = st.session_state.pending_rows
-            # Меняем приоритет у основной задачи (она первая в списке)
             rows[0]['Priority'] = "P1 (High)"
-            
-            # Если есть блокер, ему тоже меняем (он второй в списке)
             if len(rows) > 1:
                 rows[1]['Priority'] = "P1 (High)"
-            
-            # 2. Сохраняем
             save_rows(rows)
-            
-            st.success("Готово! Старый крит остался, новая задача сохранена как P1.")
-            # Сброс состояния
+            st.success("Готово! Новая задача сохранена как P1.")
             st.session_state.p0_conflict = False
             st.session_state.pending_rows = []
             st.rerun()
             
-    st.markdown("---") 
-    # Останавливаем выполнение, чтобы не рисовать форму снизу, пока не решат конфликт
-    st.stop() 
-
+    st.stop()
 
 # --- САЙДБАР ---
 st.sidebar.header("⚙️ Ресурсы команд")
@@ -196,7 +233,6 @@ with st.form("main_form", clear_on_submit=True):
         if not task_name:
             st.error("Введите название основной задачи!")
         else:
-            # Подготовка данных (но пока НЕ сохранение)
             rows_to_save = []
             
             row_main = pd.DataFrame([{
@@ -227,13 +263,9 @@ with st.form("main_form", clear_on_submit=True):
                     }])
                     rows_to_save.append(row_blocker)
 
-            # --- ЛОГИКА ПРОВЕРКИ P0 ---
-            # Проверяем только если пытаемся создать P0
+            # Проверка P0
             if priority == "P0 (Critical)":
-                # Загружаем текущие данные для проверки
                 current_df = load_data()
-                
-                # Ищем, есть ли у ЭТОГО исполнителя (main_team) уже P0 задача типа Own Task
                 existing_p0 = current_df[
                     (current_df['Executor'] == main_team) & 
                     (current_df['Priority'] == 'P0 (Critical)') &
@@ -241,14 +273,12 @@ with st.form("main_form", clear_on_submit=True):
                 ]
                 
                 if not existing_p0.empty:
-                    # КОНФЛИКТ!
                     st.session_state.p0_conflict = True
                     st.session_state.pending_rows = rows_to_save
-                    st.rerun() # Перезагружаем страницу, чтобы показать блок с кнопками Да/Нет
+                    st.rerun()
             
-            # Если конфликта нет (или приоритет не P0), сохраняем сразу
             save_rows(rows_to_save)
-            st.success("Задача сохранена!")
+            st.success("Задача сохранена! (Лист 'csv' для Jira обновлен)")
             st.rerun()
 
 # --- АНАЛИТИКА ---
@@ -292,5 +322,5 @@ if not df_tasks.empty:
     fig.update_layout(barmode='overlay', title="Capacity vs Workload")
     st.plotly_chart(fig, use_container_width=True)
     
-    st.subheader("📋 Список всех задач")
+    st.subheader("📋 Список всех задач (Вид для Jira доступен в листе 'csv')")
     st.dataframe(df_tasks, use_container_width=True)
