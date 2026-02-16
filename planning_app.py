@@ -4,12 +4,13 @@ import plotly.graph_objects as go
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# 1. Настройка страницы
+# --- 1. НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="Quarterly Planning", layout="wide")
 
-# --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
+# --- 2. ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
 def get_client():
     try:
+        # Проверяем наличие секретов (для Streamlit Cloud)
         if "gcp_service_account" not in st.secrets:
             st.error("❌ Не найден раздел [gcp_service_account] в Secrets.")
             st.stop()
@@ -26,9 +27,10 @@ def get_client():
 
 def get_main_sheet():
     client = get_client()
+    # Открываем основную таблицу
     return client.open("Quarterly Planning Data").sheet1
 
-# --- НОВАЯ ФУНКЦИЯ: СИНХРОНИЗАЦИЯ С JIRA CSV ---
+# --- 3. ФУНКЦИЯ СИНХРОНИЗАЦИИ С JIRA (ЛИСТ 'csv') ---
 def sync_jira_sheet(df_source):
     if df_source.empty:
         return
@@ -36,26 +38,25 @@ def sync_jira_sheet(df_source):
     client = get_client()
     sh = client.open("Quarterly Planning Data")
     
-    # 1. Получаем или создаем лист "csv"
+    # Пытаемся открыть лист 'csv', если нет - создаем
     try:
         ws_csv = sh.worksheet("csv")
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
-    # 2. Подготовка данных для Jira
-    # Jira требует специфические заголовки: Summary, Description, Priority, etc.
+    # Подготовка DataFrame для Jira
     df_jira = pd.DataFrame()
 
-    # MAPPING (Сопоставление полей)
+    # Mapping полей
     df_jira['Summary'] = df_source['Task Name']
     
-    # Описание: добавляем в него исходного заказчика и стрим, чтобы не потерялось
+    # Формируем богатое описание
     df_jira['Description'] = df_source['Description'] + "\n\n" + \
                              "--- Planning Info ---\n" + \
                              "Internal Requester: " + df_source['Requester'] + "\n" + \
-                             "Planning Type: " + df_source['Type']
+                             "Internal Type: " + df_source['Type']
 
-    # Приоритеты Jira (Mapping)
+    # Mapping Приоритетов
     priority_map = {
         "P0 (Critical)": "Highest",
         "P1 (High)": "High",
@@ -67,34 +68,32 @@ def sync_jira_sheet(df_source):
     # Story Points
     df_jira['Story Points'] = pd.to_numeric(df_source['Estimate (SP)'], errors='coerce').fillna(0)
 
-    # Issue Type (По умолчанию Story)
+    # Issue Type
     df_jira['Issue Type'] = "Story"
 
-    # Labels (Метки). Превращаем Client в метку без пробелов (напр. Global_Admin_Panel)
-    # Также добавляем метку квартального планирования
+    # Labels (Превращаем Клиента в тег, убираем пробелы)
     df_jira['Labels'] = df_source['Client'].str.replace(" ", "_") + ", Q_Planning"
 
-    # Assignee (Исполнитель) - в Jira это обычно логин, но пока пишем название команды
-    # Чтобы потом при импорте сопоставить
+    # Component (Исполнитель)
     df_jira['Component'] = df_source['Executor'] 
 
-    # 3. Запись в лист csv
+    # Перезаписываем лист csv
     ws_csv.clear()
-    # set_dataframe требует gspread-dataframe, но мы сделаем по-простому через списки
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-
-# --- ЧТЕНИЕ ДАННЫХ ---
+# --- 4. ЧТЕНИЕ ДАННЫХ ---
 def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
     expected_cols = ['Task Name', 'Description', 'Requester', 'Executor', 'Client', 'Priority', 'Estimate (SP)', 'Type']
     
+    # Если таблица пустая
     if not raw_data:
         sheet.append_row(expected_cols)
         return pd.DataFrame(columns=expected_cols)
 
+    # Если заголовки не совпадают (старая версия)
     if raw_data[0] != expected_cols:
         sheet.update(range_name='A1:H1', values=[expected_cols])
         raw_data = sheet.get_all_values()
@@ -105,43 +104,56 @@ def load_data():
     df = pd.DataFrame(data, columns=headers)
     return df
 
-# --- СОХРАНЕНИЕ ---
+# --- 5. СОХРАНЕНИЕ (Умная запись ВНУТРЬ таблицы) ---
 def save_rows(rows_list):
     sheet = get_main_sheet()
+    all_values = sheet.get_all_values()
+    
+    # Ищем последнюю заполненную строку (где есть текст в первой колонке)
+    last_filled_row = 0
+    for i, row in enumerate(all_values):
+        if row and len(row) > 0 and row[0].strip():
+            last_filled_row = i + 1
+            
+    # Пишем в следующую строку
+    target_row = last_filled_row + 1
+    
+    # Подготовка данных
     values_to_append = []
     for row_df in rows_list:
         values_to_append.append(row_df.values.tolist()[0])
-    sheet.append_rows(values_to_append)
+        
+    # Записываем данные в конкретный диапазон
+    sheet.update(range_name=f'A{target_row}', values=values_to_append)
     
-    # ПОСЛЕ СОХРАНЕНИЯ - ОБНОВЛЯЕМ JIRA ЛИСТ
-    # Читаем обновленные данные
+    # Сразу обновляем лист для Jira
     all_data = load_data() 
     sync_jira_sheet(all_data)
 
-
-# --- ПОНИЖЕНИЕ ПРИОРИТЕТА ---
+# --- 6. ПОНИЖЕНИЕ ПРИОРИТЕТА (Для конфликтов P0) ---
 def downgrade_existing_p0(executor_team):
     sheet = get_main_sheet()
     all_values = sheet.get_all_values()
     
     for i, row in enumerate(all_values):
         if i == 0: continue
-        # row indices: 3=Executor, 5=Priority, 7=Type
+        # Индексы: 3=Executor, 5=Priority, 7=Type
         if (len(row) > 7 and 
             row[3] == executor_team and 
             row[5] == "P0 (Critical)" and 
             row[7] == "Own Task"):
             
             row_number = i + 1
+            # Меняем ячейку F (Priority) на P1
             sheet.update_cell(row_number, 6, "P1 (High)")
             return True
     return False
 
-# --- ИНТЕРФЕЙС ---
+# --- 7. ИНТЕРФЕЙС И ЛОГИКА ---
 st.title("📊 Quarterly Planning Tool")
 
 if st.button("🔄 Обновить данные"):
-    # При ручном обновлении тоже синхронизируем лист csv, на всякий случай
+    # Принудительно синхронизируем Jira при обновлении
     df = load_data()
     sync_jira_sheet(df)
     st.rerun()
@@ -155,7 +167,7 @@ SP_OPTIONS = [1, 2, 3, 5, 8]
 if 'capacity_settings' not in st.session_state:
     st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21} for dept in DEPARTMENTS}
 
-# --- КОНФЛИКТ P0 ---
+# --- ОБРАБОТКА КОНФЛИКТА P0 ---
 if 'p0_conflict' not in st.session_state:
     st.session_state.p0_conflict = False
     st.session_state.pending_rows = []
@@ -169,9 +181,12 @@ if st.session_state.p0_conflict:
     
     with col_yes:
         if st.button("ДА, понизить старый до P1, новый записать как P0"):
+            # Понижаем старый
             executor = st.session_state.pending_rows[0]['Executor'].iloc[0]
             downgrade_existing_p0(executor)
+            # Сохраняем новый
             save_rows(st.session_state.pending_rows)
+            
             st.success("Готово! Старый крит стал P1, новый записан как P0.")
             st.session_state.p0_conflict = False
             st.session_state.pending_rows = []
@@ -179,17 +194,19 @@ if st.session_state.p0_conflict:
 
     with col_no:
         if st.button("НЕТ, не трогать старый, новый записать как P1"):
+            # Меняем приоритет у новой задачи
             rows = st.session_state.pending_rows
             rows[0]['Priority'] = "P1 (High)"
             if len(rows) > 1:
-                rows[1]['Priority'] = "P1 (High)"
+                rows[1]['Priority'] = "P1 (High)" # Блокеру тоже
+            
             save_rows(rows)
             st.success("Готово! Новая задача сохранена как P1.")
             st.session_state.p0_conflict = False
             st.session_state.pending_rows = []
             st.rerun()
             
-    st.stop()
+    st.stop() # Останавливаем рендеринг формы, пока не решен конфликт
 
 # --- САЙДБАР ---
 st.sidebar.header("⚙️ Ресурсы команд")
@@ -200,18 +217,20 @@ for dept in DEPARTMENTS:
         d = st.number_input(f"{dept}: Дней", 1, 60, 21, key=f"d_{dept}")
         st.session_state.capacity_settings[dept] = {'people': p, 'days': d}
 
-# --- ФОРМА ---
+# --- ФОРМА СОЗДАНИЯ ЗАДАЧИ ---
 st.subheader("➕ Создание задачи")
 
 with st.form("main_form", clear_on_submit=True):
+    # 1. Чья задача
     main_team = st.selectbox("Чья задача? (Кто исполнитель)", DEPARTMENTS)
     
+    # 2. Описание
     task_name = st.text_input("Название задачи", placeholder="Краткая суть...")
     description = st.text_area("Описание задачи", placeholder="Детали, DoD...", height=100)
     
     col_client, col_prio, col_sp = st.columns(3)
     with col_client:
-        client = st.selectbox("Заказчик", CLIENTS)
+        client = st.selectbox("Заказчик (Стрим/Продукт)", CLIENTS)
     with col_prio:
         priority = st.selectbox("Приоритет", PRIORITIES)
     with col_sp:
@@ -219,6 +238,7 @@ with st.form("main_form", clear_on_submit=True):
 
     st.markdown("---")
     
+    # --- БЛОКЕР ---
     st.markdown("### 🧱 Добавить задачу блокер")
     blocker_team = st.selectbox("На какую команду ставим блокер?", ["(Нет блокера)"] + DEPARTMENTS)
     blocker_name = st.text_input("Название задачи-блокера")
@@ -235,6 +255,7 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
+            # Строка основной задачи
             row_main = pd.DataFrame([{
                 'Task Name': task_name,
                 'Description': description,
@@ -247,9 +268,10 @@ with st.form("main_form", clear_on_submit=True):
             }])
             rows_to_save.append(row_main)
             
+            # Строка блокера
             if blocker_team != "(Нет блокера)" and blocker_team != main_team:
                 if not blocker_name:
-                    st.warning("Блокер не будет создан: нет названия.")
+                    st.warning("Название блокера не указано. Блокер не создан.")
                 else:
                     row_blocker = pd.DataFrame([{
                         'Task Name': blocker_name,
@@ -263,7 +285,7 @@ with st.form("main_form", clear_on_submit=True):
                     }])
                     rows_to_save.append(row_blocker)
 
-            # Проверка P0
+            # Проверка P0 перед сохранением
             if priority == "P0 (Critical)":
                 current_df = load_data()
                 existing_p0 = current_df[
@@ -275,10 +297,11 @@ with st.form("main_form", clear_on_submit=True):
                 if not existing_p0.empty:
                     st.session_state.p0_conflict = True
                     st.session_state.pending_rows = rows_to_save
-                    st.rerun()
+                    st.rerun() # Перезагрузка для показа диалога
             
+            # Сохранение
             save_rows(rows_to_save)
-            st.success("Задача сохранена! (Лист 'csv' для Jira обновлен)")
+            st.success("Задача сохранена! (Jira-лист обновлен)")
             st.rerun()
 
 # --- АНАЛИТИКА ---
@@ -291,6 +314,7 @@ except Exception as e:
 if not df_tasks.empty:
     st.divider()
     
+    # Преобразуем SP
     df_tasks['Estimate (SP)'] = pd.to_numeric(df_tasks['Estimate (SP)'], errors='coerce').fillna(0)
     
     cap_data = [{'Executor': d, 'Total Capacity': s['people']*s['days']} for d, s in st.session_state.capacity_settings.items()]
@@ -322,5 +346,5 @@ if not df_tasks.empty:
     fig.update_layout(barmode='overlay', title="Capacity vs Workload")
     st.plotly_chart(fig, use_container_width=True)
     
-    st.subheader("📋 Список всех задач (Вид для Jira доступен в листе 'csv')")
+    st.subheader("📋 Список всех задач")
     st.dataframe(df_tasks, use_container_width=True)
