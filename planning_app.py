@@ -26,7 +26,6 @@ def get_client():
 
 def get_main_sheet():
     client = get_client()
-    # Открываем первую страницу (обычно это Sheet1)
     return client.open("Quarterly Planning Data").sheet1
 
 # --- 3. JIRA SYNC ---
@@ -57,12 +56,11 @@ def sync_jira_sheet(client, df_source):
     ws_csv.clear()
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-# --- 4. ANALYTICS SYNC (ТЕПЕРЬ НА ФОРМУЛАХ) ---
+# --- 4. ANALYTICS SYNC (ИСПРАВЛЕННЫЕ РАЗДЕЛИТЕЛИ ;) ---
 def update_analytics_tab(client, capacity_settings):
     sh = client.open("Quarterly Planning Data")
-    main_ws_name = sh.sheet1.title  # Узнаем имя главного листа (обычно Sheet1)
+    main_ws_name = sh.sheet1.title
     
-    # Создаем или открываем лист Analytics_Data
     try:
         ws_an = sh.worksheet("Analytics_Data")
     except:
@@ -70,45 +68,34 @@ def update_analytics_tab(client, capacity_settings):
     
     ws_an.clear()
     
-    # --- ТАБЛИЦА 1: CAPACITY (ФОРМУЛЫ) ---
-    # Заголовки
+    # --- ТАБЛИЦА 1: CAPACITY ---
     headers_1 = ["Исполнитель", "Total Capacity", "Занято (Live Formula)", "Остаток"]
-    
-    # Формируем строки с формулами
-    # Мы используем английские имена функций (SUMIF), Google сам переведет их на язык пользователя
     rows = []
-    
-    # Начинаем данные со 2-й строки
     current_row = 2
     
     for team, settings in capacity_settings.items():
         cap_val = settings['people'] * settings['days']
         
-        # Формула СУММЕСЛИ: Ищет команду в D, суммирует G
-        # Внимание: используем имя листа в одинарных кавычках
-        formula_used = f"=SUMIF('{main_ws_name}'!D:D, A{current_row}, '{main_ws_name}'!G:G)"
+        # ВАЖНО: Используем точку с запятой (;) для русской локали
+        # Google сам переведет SUMIF в СУММЕСЛИ
+        formula_used = f"=SUMIF('{main_ws_name}'!D:D; A{current_row}; '{main_ws_name}'!G:G)"
         
-        # Формула остатка: Capacity (B) - Used (C)
         formula_left = f"=B{current_row}-C{current_row}"
         
         rows.append([team, cap_val, formula_used, formula_left])
         current_row += 1
         
-    # Записываем Таблицу 1
     ws_an.update(range_name='A1', values=[[headers_1[0], headers_1[1], headers_1[2], headers_1[3]]])
     ws_an.update(range_name='A2', values=rows, value_input_option='USER_ENTERED')
     
-    # --- ТАБЛИЦА 2: ЗАКАЗЧИКИ (ОДНА МОЩНАЯ ФОРМУЛА QUERY) ---
-    # Отступаем вниз
+    # --- ТАБЛИЦА 2: ЗАКАЗЧИКИ (QUERY) ---
     start_row_2 = len(rows) + 5
     
     ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Распределение по Заказчикам (Автоматическая сводная)"]])
     
-    # QUERY формула делает группировку сама.
-    # Select D (Исполнитель), E (Заказчик), Sum(G) (SP)
-    # Where D is not null (чтобы не брать пустые строки)
-    # Group by D, E
-    query_formula = f"=QUERY('{main_ws_name}'!A:H, \"SELECT D, E, SUM(G) WHERE D IS NOT NULL AND G IS NOT NULL GROUP BY D, E LABEL D 'Исполнитель', E 'Заказчик', SUM(G) 'Сумма SP'\", 1)"
+    # ВАЖНО: Разделители аргументов функции - точка с запятой (;).
+    # Внутри SQL-строки ("SELECT ...") запятые остаются запятыми!
+    query_formula = f"=QUERY('{main_ws_name}'!A:H; \"SELECT D, E, SUM(G) WHERE D IS NOT NULL AND G IS NOT NULL GROUP BY D, E LABEL D 'Исполнитель', E 'Заказчик', SUM(G) 'Сумма SP'\"; 1)"
     
     ws_an.update(range_name=f'A{start_row_2}', values=[[query_formula]], value_input_option='USER_ENTERED')
 
@@ -151,12 +138,9 @@ def save_rows(rows_list):
         
     sheet.update(range_name=f'A{target_row}', values=values_to_append)
     
-    # Обновляем все вспомогательные листы
     all_data = load_data()
     client = get_client()
     sync_jira_sheet(client, all_data)
-    
-    # ЗАПУСКАЕМ ОБНОВЛЕНИЕ ФОРМУЛ (Оно передаст актуальные настройки капасити)
     update_analytics_tab(client, st.session_state.capacity_settings)
 
 # --- 7. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
@@ -173,7 +157,6 @@ def downgrade_existing_p0(executor_team):
 # --- 8. ИНТЕРФЕЙС ---
 st.title("📊 Quarterly Planning Tool")
 
-# КОНСТАНТЫ
 DEPARTMENTS = ["Data Platform", "BI", "ML", "DA", "DE", "Data Ops", "WAS"]
 CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casino", "Finance Core"]
 PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
@@ -186,7 +169,6 @@ if st.button("🔄 Обновить данные"):
     df = load_data()
     client = get_client()
     sync_jira_sheet(client, df)
-    # Обновляем формулы аналитики при ручном обновлении
     update_analytics_tab(client, st.session_state.capacity_settings)
     st.rerun()
 
@@ -236,7 +218,6 @@ for dept in DEPARTMENTS:
 st.subheader("➕ Создание задачи")
 
 with st.form("main_form", clear_on_submit=True):
-    # Основная задача
     main_team = st.selectbox("Чья задача? (Кто исполнитель)", DEPARTMENTS)
     task_name = st.text_input("Название задачи", placeholder="Краткая суть...")
     description = st.text_area("Описание задачи", placeholder="Детали, DoD...", height=100)
@@ -248,7 +229,6 @@ with st.form("main_form", clear_on_submit=True):
 
     st.markdown("---")
     
-    # Зависимость 1
     st.markdown("### 🔗 Зависимость №1")
     col_d1_1, col_d1_2 = st.columns([1, 2])
     with col_d1_1: dep1_type = st.radio("Тип №1:", ["Блокер", "Энейблер"], horizontal=True, key="d1_type")
@@ -258,7 +238,6 @@ with st.form("main_form", clear_on_submit=True):
     
     st.markdown("---")
 
-    # Зависимость 2
     st.markdown("### 🔗 Зависимость №2")
     col_d2_1, col_d2_2 = st.columns([1, 2])
     with col_d2_1: dep2_type = st.radio("Тип №2:", ["Блокер", "Энейблер"], horizontal=True, key="d2_type")
@@ -274,7 +253,6 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            # Main Task
             rows_to_save.append(pd.DataFrame([{
                 'Название задачи': task_name,
                 'Описание': description,
@@ -286,7 +264,6 @@ with st.form("main_form", clear_on_submit=True):
                 'Тип': 'Own Task'
             }]))
             
-            # Dep 1
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -301,7 +278,6 @@ with st.form("main_form", clear_on_submit=True):
                         'Тип': g_type
                     }]))
             
-            # Dep 2
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
                 if dep2_name:
                     g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
@@ -316,7 +292,6 @@ with st.form("main_form", clear_on_submit=True):
                         'Тип': g_type
                     }]))
 
-            # P0 Check
             if priority == "P0 (Critical)":
                 current_df = load_data()
                 existing_p0 = current_df[
@@ -330,10 +305,10 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! (Таблицы графиков обновлены)")
+            st.success("Данные сохранены! (Формулы обновлены для региональных настроек)")
             st.rerun()
 
-# АНАЛИТИКА (ВНИЗУ СТРАНИЦЫ)
+# АНАЛИТИКА
 try:
     df_tasks = load_data()
 except:
