@@ -26,9 +26,10 @@ def get_client():
 
 def get_main_sheet():
     client = get_client()
+    # Открываем первую страницу (обычно это Sheet1)
     return client.open("Quarterly Planning Data").sheet1
 
-# --- 3. JIRA SYNC (Лист 'csv') ---
+# --- 3. JIRA SYNC ---
 def sync_jira_sheet(client, df_source):
     if df_source.empty:
         return
@@ -56,9 +57,10 @@ def sync_jira_sheet(client, df_source):
     ws_csv.clear()
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-# --- 4. ANALYTICS SYNC (Новый лист для графиков) ---
-def update_analytics_tab(client, df_tasks, capacity_settings):
+# --- 4. ANALYTICS SYNC (ТЕПЕРЬ НА ФОРМУЛАХ) ---
+def update_analytics_tab(client, capacity_settings):
     sh = client.open("Quarterly Planning Data")
+    main_ws_name = sh.sheet1.title  # Узнаем имя главного листа (обычно Sheet1)
     
     # Создаем или открываем лист Analytics_Data
     try:
@@ -68,41 +70,47 @@ def update_analytics_tab(client, df_tasks, capacity_settings):
     
     ws_an.clear()
     
-    # --- ТАБЛИЦА 1: ЗАГРУЗКА (CAPACITY VS LOAD) ---
-    # Подготовка данных
-    df_tasks['Оценка (SP)'] = pd.to_numeric(df_tasks['Оценка (SP)'], errors='coerce').fillna(0)
-    load_data = df_tasks.groupby('Исполнитель')['Оценка (SP)'].sum().reset_index()
-    load_data.columns = ['Исполнитель', 'Занято (SP)']
+    # --- ТАБЛИЦА 1: CAPACITY (ФОРМУЛЫ) ---
+    # Заголовки
+    headers_1 = ["Исполнитель", "Total Capacity", "Занято (Live Formula)", "Остаток"]
     
-    # Данные о капасити из настроек приложения
-    cap_rows = []
+    # Формируем строки с формулами
+    # Мы используем английские имена функций (SUMIF), Google сам переведет их на язык пользователя
+    rows = []
+    
+    # Начинаем данные со 2-й строки
+    current_row = 2
+    
     for team, settings in capacity_settings.items():
-        total_sp = settings['people'] * settings['days']
-        cap_rows.append({'Исполнитель': team, 'Всего доступно (Capacity)': total_sp})
-    df_cap = pd.DataFrame(cap_rows)
+        cap_val = settings['people'] * settings['days']
+        
+        # Формула СУММЕСЛИ: Ищет команду в D, суммирует G
+        # Внимание: используем имя листа в одинарных кавычках
+        formula_used = f"=SUMIF('{main_ws_name}'!D:D, A{current_row}, '{main_ws_name}'!G:G)"
+        
+        # Формула остатка: Capacity (B) - Used (C)
+        formula_left = f"=B{current_row}-C{current_row}"
+        
+        rows.append([team, cap_val, formula_used, formula_left])
+        current_row += 1
+        
+    # Записываем Таблицу 1
+    ws_an.update(range_name='A1', values=[[headers_1[0], headers_1[1], headers_1[2], headers_1[3]]])
+    ws_an.update(range_name='A2', values=rows, value_input_option='USER_ENTERED')
     
-    # Объединяем
-    df_chart1 = pd.merge(df_cap, load_data, on='Исполнитель', how='left').fillna(0)
-    df_chart1['Остаток'] = df_chart1['Всего доступно (Capacity)'] - df_chart1['Занято (SP)']
+    # --- ТАБЛИЦА 2: ЗАКАЗЧИКИ (ОДНА МОЩНАЯ ФОРМУЛА QUERY) ---
+    # Отступаем вниз
+    start_row_2 = len(rows) + 5
     
-    # --- ТАБЛИЦА 2: РАСПРЕДЕЛЕНИЕ ПО ЗАКАЗЧИКАМ ---
-    df_chart2 = df_tasks.groupby(['Исполнитель', 'Заказчик'])['Оценка (SP)'].sum().reset_index()
-    # Сортируем для красоты
-    df_chart2 = df_chart2.sort_values(by=['Исполнитель', 'Оценка (SP)'], ascending=[True, False])
-
-    # --- ЗАПИСЬ В ГУГЛ ---
-    # Заголовок 1
-    ws_an.update(range_name='A1', values=[["ТАБЛИЦА 1: Загрузка команд (Для графика 'Столбчатая диаграмма')"]])
-    # Сама таблица 1 (начинаем с A2)
-    ws_an.update(range_name='A2', values=[df_chart1.columns.values.tolist()] + df_chart1.values.tolist())
+    ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Распределение по Заказчикам (Автоматическая сводная)"]])
     
-    # Отступ вниз
-    start_row_2 = len(df_chart1) + 6
+    # QUERY формула делает группировку сама.
+    # Select D (Исполнитель), E (Заказчик), Sum(G) (SP)
+    # Where D is not null (чтобы не брать пустые строки)
+    # Group by D, E
+    query_formula = f"=QUERY('{main_ws_name}'!A:H, \"SELECT D, E, SUM(G) WHERE D IS NOT NULL AND G IS NOT NULL GROUP BY D, E LABEL D 'Исполнитель', E 'Заказчик', SUM(G) 'Сумма SP'\", 1)"
     
-    # Заголовок 2
-    ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Траты на заказчиков (Для графика 'Линейчатая' или 'С накоплением')"]])
-    # Сама таблица 2
-    ws_an.update(range_name=f'A{start_row_2}', values=[df_chart2.columns.values.tolist()] + df_chart2.values.tolist())
+    ws_an.update(range_name=f'A{start_row_2}', values=[[query_formula]], value_input_option='USER_ENTERED')
 
 
 # --- 5. ЧТЕНИЕ ДАННЫХ ---
@@ -134,7 +142,7 @@ def save_rows(rows_list):
     for i, row in enumerate(all_values):
         if row and len(row) > 0 and row[0].strip():
             last_filled_row = i + 1
-    
+            
     target_row = last_filled_row + 1
     
     values_to_append = []
@@ -147,8 +155,9 @@ def save_rows(rows_list):
     all_data = load_data()
     client = get_client()
     sync_jira_sheet(client, all_data)
-    # Передаем настройки капасити для расчетов
-    update_analytics_tab(client, all_data, st.session_state.capacity_settings)
+    
+    # ЗАПУСКАЕМ ОБНОВЛЕНИЕ ФОРМУЛ (Оно передаст актуальные настройки капасити)
+    update_analytics_tab(client, st.session_state.capacity_settings)
 
 # --- 7. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
 def downgrade_existing_p0(executor_team):
@@ -177,7 +186,8 @@ if st.button("🔄 Обновить данные"):
     df = load_data()
     client = get_client()
     sync_jira_sheet(client, df)
-    update_analytics_tab(client, df, st.session_state.capacity_settings)
+    # Обновляем формулы аналитики при ручном обновлении
+    update_analytics_tab(client, st.session_state.capacity_settings)
     st.rerun()
 
 # КОНФЛИКТ P0
