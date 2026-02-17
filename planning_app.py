@@ -56,8 +56,8 @@ def sync_jira_sheet(client, df_source):
     ws_csv.clear()
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-# --- 4. ANALYTICS SYNC (ИСПРАВЛЕННЫЕ РАЗДЕЛИТЕЛИ ;) ---
-def update_analytics_tab(client, capacity_settings):
+# --- 4. ANALYTICS SYNC (ОБНОВЛЕННАЯ ВЕРСИЯ С FORMULAS В ТАБЛИЦЕ 2) ---
+def update_analytics_tab(client, df_tasks, capacity_settings):
     sh = client.open("Quarterly Planning Data")
     main_ws_name = sh.sheet1.title
     
@@ -68,36 +68,56 @@ def update_analytics_tab(client, capacity_settings):
     
     ws_an.clear()
     
-    # --- ТАБЛИЦА 1: CAPACITY ---
+    # === ТАБЛИЦА 1: CAPACITY ===
     headers_1 = ["Исполнитель", "Total Capacity", "Занято (Live Formula)", "Остаток"]
-    rows = []
+    rows_1 = []
     current_row = 2
     
     for team, settings in capacity_settings.items():
         cap_val = settings['people'] * settings['days']
-        
-        # ВАЖНО: Используем точку с запятой (;) для русской локали
-        # Google сам переведет SUMIF в СУММЕСЛИ
+        # Формула: СУММЕСЛИ(Столбец D, ИмяКоманды, Столбец G)
         formula_used = f"=SUMIF('{main_ws_name}'!D:D; A{current_row}; '{main_ws_name}'!G:G)"
-        
         formula_left = f"=B{current_row}-C{current_row}"
         
-        rows.append([team, cap_val, formula_used, formula_left])
+        rows_1.append([team, cap_val, formula_used, formula_left])
         current_row += 1
         
-    ws_an.update(range_name='A1', values=[[headers_1[0], headers_1[1], headers_1[2], headers_1[3]]])
-    ws_an.update(range_name='A2', values=rows, value_input_option='USER_ENTERED')
+    ws_an.update(range_name='A1', values=[headers_1])
+    ws_an.update(range_name='A2', values=rows_1, value_input_option='USER_ENTERED')
     
-    # --- ТАБЛИЦА 2: ЗАКАЗЧИКИ (QUERY) ---
-    start_row_2 = len(rows) + 5
+    # === ТАБЛИЦА 2: ЗАКАЗЧИКИ (ТЕПЕРЬ ТОЖЕ ФОРМУЛЫ) ===
+    start_row_2 = len(rows_1) + 6
+    ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Распределение по Заказчикам (Live Formulas)"]])
+    headers_2 = ["Исполнитель", "Заказчик", "Сумма SP (Live Formula)"]
+    ws_an.update(range_name=f'A{start_row_2}', values=[headers_2])
     
-    ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Распределение по Заказчикам (Автоматическая сводная)"]])
-    
-    # ВАЖНО: Разделители аргументов функции - точка с запятой (;).
-    # Внутри SQL-строки ("SELECT ...") запятые остаются запятыми!
-    query_formula = f"=QUERY('{main_ws_name}'!A:H; \"SELECT D, E, SUM(G) WHERE D IS NOT NULL AND G IS NOT NULL GROUP BY D, E LABEL D 'Исполнитель', E 'Заказчик', SUM(G) 'Сумма SP'\"; 1)"
-    
-    ws_an.update(range_name=f'A{start_row_2}', values=[[query_formula]], value_input_option='USER_ENTERED')
+    # 1. Получаем уникальные пары (Исполнитель, Заказчик) из текущих данных
+    if not df_tasks.empty:
+        # Убираем пустые
+        df_clean = df_tasks[df_tasks['Исполнитель'].astype(bool) & df_tasks['Заказчик'].astype(bool)]
+        unique_pairs = df_clean[['Исполнитель', 'Заказчик']].drop_duplicates().sort_values(by=['Исполнитель', 'Заказчик'])
+        
+        rows_2 = []
+        # Начинаем данные со следующей строки после заголовка
+        curr_row_2 = start_row_2 + 1 
+        
+        for index, row in unique_pairs.iterrows():
+            executor = row['Исполнитель']
+            client_name = row['Заказчик']
+            
+            # Формула: СУММЕСЛИМН(СуммаRange; КритерийRange1; Критерий1; КритерийRange2; Критерий2)
+            # G:G - SP
+            # D:D - Исполнитель
+            # E:E - Заказчик
+            # Используем ; для русской локали
+            formula_sumifs = f"=SUMIFS('{main_ws_name}'!G:G; '{main_ws_name}'!D:D; A{curr_row_2}; '{main_ws_name}'!E:E; B{curr_row_2})"
+            
+            rows_2.append([executor, client_name, formula_sumifs])
+            curr_row_2 += 1
+            
+        # Записываем данные
+        if rows_2:
+            ws_an.update(range_name=f'A{start_row_2+1}', values=rows_2, value_input_option='USER_ENTERED')
 
 
 # --- 5. ЧТЕНИЕ ДАННЫХ ---
@@ -141,7 +161,7 @@ def save_rows(rows_list):
     all_data = load_data()
     client = get_client()
     sync_jira_sheet(client, all_data)
-    update_analytics_tab(client, st.session_state.capacity_settings)
+    update_analytics_tab(client, all_data, st.session_state.capacity_settings)
 
 # --- 7. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
 def downgrade_existing_p0(executor_team):
@@ -169,7 +189,7 @@ if st.button("🔄 Обновить данные"):
     df = load_data()
     client = get_client()
     sync_jira_sheet(client, df)
-    update_analytics_tab(client, st.session_state.capacity_settings)
+    update_analytics_tab(client, df, st.session_state.capacity_settings)
     st.rerun()
 
 # КОНФЛИКТ P0
@@ -305,7 +325,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! (Формулы обновлены для региональных настроек)")
+            st.success("Данные сохранены! (Графики обновлены)")
             st.rerun()
 
 # АНАЛИТИКА
