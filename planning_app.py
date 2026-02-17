@@ -56,8 +56,8 @@ def sync_jira_sheet(client, df_source):
     ws_csv.clear()
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-# --- 4. ANALYTICS SYNC (ОБНОВЛЕННАЯ ВЕРСИЯ С FORMULAS В ТАБЛИЦЕ 2) ---
-def update_analytics_tab(client, df_tasks, capacity_settings):
+# --- 4. ANALYTICS SYNC (РАЗБИВКА ПО КОМАНДАМ) ---
+def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     sh = client.open("Quarterly Planning Data")
     main_ws_name = sh.sheet1.title
     
@@ -75,49 +75,48 @@ def update_analytics_tab(client, df_tasks, capacity_settings):
     
     for team, settings in capacity_settings.items():
         cap_val = settings['people'] * settings['days']
-        # Формула: СУММЕСЛИ(Столбец D, ИмяКоманды, Столбец G)
         formula_used = f"=SUMIF('{main_ws_name}'!D:D; A{current_row}; '{main_ws_name}'!G:G)"
         formula_left = f"=B{current_row}-C{current_row}"
-        
         rows_1.append([team, cap_val, formula_used, formula_left])
         current_row += 1
         
     ws_an.update(range_name='A1', values=[headers_1])
     ws_an.update(range_name='A2', values=rows_1, value_input_option='USER_ENTERED')
     
-    # === ТАБЛИЦА 2: ЗАКАЗЧИКИ (ТЕПЕРЬ ТОЖЕ ФОРМУЛЫ) ===
-    start_row_2 = len(rows_1) + 6
-    ws_an.update(range_name=f'A{start_row_2-1}', values=[["ТАБЛИЦА 2: Распределение по Заказчикам (Live Formulas)"]])
-    headers_2 = ["Исполнитель", "Заказчик", "Сумма SP (Live Formula)"]
-    ws_an.update(range_name=f'A{start_row_2}', values=[headers_2])
+    # === ТАБЛИЦЫ ПО КОМАНДАМ (СПЛИТ) ===
+    # Отступаем от первой таблицы
+    start_row = len(rows_1) + 6
     
-    # 1. Получаем уникальные пары (Исполнитель, Заказчик) из текущих данных
-    if not df_tasks.empty:
-        # Убираем пустые
-        df_clean = df_tasks[df_tasks['Исполнитель'].astype(bool) & df_tasks['Заказчик'].astype(bool)]
-        unique_pairs = df_clean[['Исполнитель', 'Заказчик']].drop_duplicates().sort_values(by=['Исполнитель', 'Заказчик'])
+    # Итерируемся по каждой команде и создаем для нее свою маленькую таблицу
+    for team in capacity_settings.keys():
+        # Заголовок таблицы
+        ws_an.update(range_name=f'A{start_row}', values=[[f"РАСПРЕДЕЛЕНИЕ: {team}"]])
+        start_row += 1
         
-        rows_2 = []
-        # Начинаем данные со следующей строки после заголовка
-        curr_row_2 = start_row_2 + 1 
+        # Шапка таблицы
+        ws_an.update(range_name=f'A{start_row}', values=[["Заказчик", "SP (Live Formula)"]])
+        start_row += 1
         
-        for index, row in unique_pairs.iterrows():
-            executor = row['Исполнитель']
-            client_name = row['Заказчик']
+        team_rows = []
+        # Перечисляем всех возможных заказчиков, чтобы структура была красивой
+        for client_name in clients_list:
+            # Формула: СУММЕСЛИМН( SP; Исполнитель; "ИмяКоманды"; Заказчик; "ИмяЗаказчика" )
+            # D = Исполнитель, E = Заказчик, G = SP
+            # Мы берем имя заказчика из ячейки Ax (текущей строки), а имя команды жестко прописываем
             
-            # Формула: СУММЕСЛИМН(СуммаRange; КритерийRange1; Критерий1; КритерийRange2; Критерий2)
-            # G:G - SP
-            # D:D - Исполнитель
-            # E:E - Заказчик
-            # Используем ; для русской локали
-            formula_sumifs = f"=SUMIFS('{main_ws_name}'!G:G; '{main_ws_name}'!D:D; A{curr_row_2}; '{main_ws_name}'!E:E; B{curr_row_2})"
+            # Внимание: для текстовых констант в формулах нужны двойные кавычки ""
+            formula = f"=SUMIFS('{main_ws_name}'!G:G; '{main_ws_name}'!D:D; \"{team}\"; '{main_ws_name}'!E:E; A{start_row})"
             
-            rows_2.append([executor, client_name, formula_sumifs])
-            curr_row_2 += 1
+            team_rows.append([client_name, formula])
+            start_row += 1
             
-        # Записываем данные
-        if rows_2:
-            ws_an.update(range_name=f'A{start_row_2+1}', values=rows_2, value_input_option='USER_ENTERED')
+        # Записываем блок данных для этой команды
+        # start_row сейчас указывает на конец блока, нужно вернуться назад на длину списка
+        write_range_start = start_row - len(clients_list)
+        ws_an.update(range_name=f'A{write_range_start}', values=team_rows, value_input_option='USER_ENTERED')
+        
+        # Делаем отступ перед следующей командой
+        start_row += 2
 
 
 # --- 5. ЧТЕНИЕ ДАННЫХ ---
@@ -161,7 +160,8 @@ def save_rows(rows_list):
     all_data = load_data()
     client = get_client()
     sync_jira_sheet(client, all_data)
-    update_analytics_tab(client, all_data, st.session_state.capacity_settings)
+    # Передаем список клиентов для построения таблиц
+    update_analytics_tab(client, all_data, st.session_state.capacity_settings, CLIENTS)
 
 # --- 7. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
 def downgrade_existing_p0(executor_team):
@@ -189,7 +189,7 @@ if st.button("🔄 Обновить данные"):
     df = load_data()
     client = get_client()
     sync_jira_sheet(client, df)
-    update_analytics_tab(client, df, st.session_state.capacity_settings)
+    update_analytics_tab(client, df, st.session_state.capacity_settings, CLIENTS)
     st.rerun()
 
 # КОНФЛИКТ P0
@@ -325,7 +325,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! (Графики обновлены)")
+            st.success("Данные сохранены! (Таблицы графиков разбиты по командам)")
             st.rerun()
 
 # АНАЛИТИКА
