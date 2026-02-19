@@ -39,8 +39,7 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
-    # Фильтруем только те задачи, где стоит галочка "Берем" (TRUE)
-    # Приводим к строке, чтобы точно найти TRUE
+    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -77,26 +76,20 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     ws_an.clear()
     
     # === ТАБЛИЦА 1: CAPACITY ===
-    headers_1 = ["Исполнитель", "Total Capacity", "Занято (Live Formula)", "Остаток"]
+    headers_1 = ["Исполнитель", "Real Capacity (с учетом Threshold)", "Занято (Live Formula)", "Остаток"]
     rows_1 = []
     current_row = 2
     
     for team, settings in capacity_settings.items():
-        cap_val = settings['people'] * settings['days']
-        
-        # СМЕЩЕНИЕ КОЛОНОК (Т.к. добавили "Берем" в A):
-        # Исполнитель был D -> стал E
-        # SP был G -> стал H
-        # Мы учитываем в формуле только те задачи, где "Берем" (Колонка A) = TRUE
-        
-        # СУММЕСЛИМН( ДиапазонСуммы; ДиапазонКритерия1; Критерий1; ДиапазонКритерия2; Критерий2 )
-        # H:H - Сумма (SP)
-        # E:E - Исполнитель
-        # A:A - Берем (TRUE)
+        # Считаем реальное капасити (вычитаем процент Threshold)
+        total_days = settings['people'] * settings['days']
+        overhead_percent = settings.get('overhead', 20)
+        # Округляем до 1 знака после запятой
+        cap_val = round(total_days * (100 - overhead_percent) / 100.0, 1)
         
         formula_used = f"=SUMIFS('{main_ws_name}'!H:H; '{main_ws_name}'!E:E; A{current_row}; '{main_ws_name}'!A:A; TRUE)"
-        
         formula_left = f"=B{current_row}-C{current_row}"
+        
         rows_1.append([team, cap_val, formula_used, formula_left])
         current_row += 1
         
@@ -114,9 +107,7 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         
         team_rows = []
         for client_name in clients_list:
-            # E = Исполнитель, F = Заказчик, H = SP, A = Берем
             formula = f"=SUMIFS('{main_ws_name}'!H:H; '{main_ws_name}'!E:E; \"{team}\"; '{main_ws_name}'!F:F; A{start_row}; '{main_ws_name}'!A:A; TRUE)"
-            
             team_rows.append([client_name, formula])
             start_row += 1
             
@@ -130,18 +121,13 @@ def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
-    # Добавили колонку 'Берем' в начало
     expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'Оценка (SP)', 'Тип']
     
     if not raw_data:
         sheet.append_row(expected_cols)
         return pd.DataFrame(columns=expected_cols)
 
-    # Проверяем заголовки
     if raw_data[0] != expected_cols:
-        # Если заголовки старые, пробуем обновить.
-        # Внимание: если столбцов не хватает, это может быть опасно, 
-        # но gspread обычно сдвигает данные.
         sheet.update(range_name='A1:I1', values=[expected_cols])
         raw_data = sheet.get_all_values()
 
@@ -157,7 +143,6 @@ def save_rows(rows_list):
     
     last_filled_row = 0
     for i, row in enumerate(all_values):
-        # Проверяем 2-ю колонку (Название задачи), т.к. 1-я может быть просто чекбоксом
         if len(row) > 1 and row[1].strip():
             last_filled_row = i + 1
             
@@ -180,10 +165,8 @@ def downgrade_existing_p0(executor_team):
     all_values = sheet.get_all_values()
     for i, row in enumerate(all_values):
         if i == 0: continue
-        # Индексы сдвинулись на +1 из-за колонки "Берем"
-        # 4 = Исполнитель (E), 6 = Приоритет (G), 8 = Тип (I)
         if (len(row) > 8 and row[4] == executor_team and row[6] == "P0 (Critical)" and row[8] == "Own Task"):
-            sheet.update_cell(i + 1, 7, "P1 (High)") # Колонка G - это 7-я
+            sheet.update_cell(i + 1, 7, "P1 (High)") 
             return True
     return False
 
@@ -195,8 +178,9 @@ CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casi
 PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
 SP_OPTIONS = [1, 2, 3, 5, 8]
 
+# Инициализация настроек (добавлен overhead 20%)
 if 'capacity_settings' not in st.session_state:
-    st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21} for dept in DEPARTMENTS}
+    st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21, 'overhead': 20} for dept in DEPARTMENTS}
 
 if st.button("🔄 Обновить данные"):
     df = load_data()
@@ -240,12 +224,19 @@ if st.session_state.p0_conflict:
 
 # САЙДБАР
 st.sidebar.header("⚙️ Ресурсы команд")
-st.sidebar.info("1 SP = 1 Человеко-день")
+st.sidebar.info("Укажите людей, дни и Threshold (% вычета от капасити).")
 for dept in DEPARTMENTS:
     with st.sidebar.expander(f"{dept}", expanded=False):
-        p = st.number_input(f"{dept}: Человек", 1, 100, 5, key=f"p_{dept}")
-        d = st.number_input(f"{dept}: Дней", 1, 60, 21, key=f"d_{dept}")
-        st.session_state.capacity_settings[dept] = {'people': p, 'days': d}
+        # Подгружаем текущие значения или ставим дефолтные
+        cur_p = st.session_state.capacity_settings[dept].get('people', 5)
+        cur_d = st.session_state.capacity_settings[dept].get('days', 21)
+        cur_o = st.session_state.capacity_settings[dept].get('overhead', 20)
+        
+        p = st.number_input(f"{dept}: Человек", 1, 100, cur_p, key=f"p_{dept}")
+        d = st.number_input(f"{dept}: Дней", 1, 60, cur_d, key=f"d_{dept}")
+        o = st.number_input(f"{dept}: Threshold (минус от капасити)", 0, 100, cur_o, key=f"o_{dept}", help="Процент времени, который вычитается из общего капасити")
+        
+        st.session_state.capacity_settings[dept] = {'people': p, 'days': d, 'overhead': o}
 
 # ФОРМА
 st.subheader("➕ Создание задачи")
@@ -286,8 +277,6 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            # Мы пишем "TRUE" (строку), чтобы Гугл Таблица, 
-            # где настроен формат чекбокса, поняла это как галочку.
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -336,7 +325,7 @@ with st.form("main_form", clear_on_submit=True):
                     (current_df['Исполнитель'] == main_team) & 
                     (current_df['Приоритет'] == 'P0 (Critical)') &
                     (current_df['Тип'] == 'Own Task') &
-                    (current_df['Берем'].astype(str).str.upper() == 'TRUE') # Проверяем только взятые задачи
+                    (current_df['Берем'].astype(str).str.upper() == 'TRUE')
                 ]
                 if not existing_p0.empty:
                     st.session_state.p0_conflict = True
@@ -344,10 +333,10 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! (Графики считают только задачи с галочкой 'Берем')")
+            st.success("Данные сохранены! Реальное капасити обновлено.")
             st.rerun()
 
-# АНАЛИТИКА
+# АНАЛИТИКА (ГРАФИКИ)
 try:
     df_tasks = load_data()
 except:
@@ -355,26 +344,32 @@ except:
 
 if not df_tasks.empty:
     st.divider()
-    # Фильтруем для графика в приложении тоже
-    # Показываем только TRUE
     df_tasks_active = df_tasks[df_tasks['Берем'].astype(str).str.upper() == 'TRUE'].copy()
-    
     df_tasks_active['Оценка (SP)'] = pd.to_numeric(df_tasks_active['Оценка (SP)'], errors='coerce').fillna(0)
     
-    cap_data = [{'Исполнитель': d, 'Total Capacity': s['people']*s['days']} for d, s in st.session_state.capacity_settings.items()]
+    # Считаем реальное капасити для графика
+    cap_data = []
+    for d, s in st.session_state.capacity_settings.items():
+        total = s['people'] * s['days']
+        overhead = s.get('overhead', 20)
+        real_cap = round(total * (100 - overhead) / 100.0, 1)
+        cap_data.append({'Исполнитель': d, 'Real Capacity': real_cap})
+        
     df_cap = pd.DataFrame(cap_data)
     usage = df_tasks_active.groupby(['Исполнитель', 'Тип'])['Оценка (SP)'].sum().reset_index()
     
-    st.subheader("📊 Загрузка команд (Только 'Берем')")
+    st.subheader("📊 Загрузка команд (С учетом Threshold)")
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_cap['Исполнитель'], y=df_cap['Total Capacity'], name='Total Capacity', marker_color='lightgrey'))
+    # Рисуем серый столбик - Реальное Капасити
+    fig.add_trace(go.Bar(x=df_cap['Исполнитель'], y=df_cap['Real Capacity'], name='Real Capacity', marker_color='lightgrey', text=df_cap['Real Capacity'], textposition='auto'))
+    
     for t in ['Own Task', 'Incoming Blocker', 'Incoming Enabler']:
         sub = usage[usage['Тип'] == t]
         if not sub.empty:
-            fig.add_trace(go.Bar(x=sub['Исполнитель'], y=sub['Оценка (SP)'], name=t, text=sub['Оценка (SP)'], textposition='auto'))
-    fig.update_layout(barmode='overlay', title="Capacity vs Workload")
+            fig.add_trace(go.Bar(x=sub['Исполнитель'], y=sub['Оценка (SP)'], name=t, text=sub['Оценка (SP)'], textposition='inside'))
+            
+    fig.update_layout(barmode='overlay', title="Real Capacity vs Workload")
     st.plotly_chart(fig, use_container_width=True)
     
     st.subheader("📋 Список всех задач")
-    # Показываем таблицу целиком (даже без галочек, чтобы можно было проверить)
     st.dataframe(df_tasks, use_container_width=True)
