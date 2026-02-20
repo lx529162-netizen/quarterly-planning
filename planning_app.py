@@ -81,10 +81,8 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     current_row = 2
     
     for team, settings in capacity_settings.items():
-        # Считаем реальное капасити (вычитаем процент Threshold)
         total_days = settings['people'] * settings['days']
         overhead_percent = settings.get('overhead', 20)
-        # Округляем до 1 знака после запятой
         cap_val = round(total_days * (100 - overhead_percent) / 100.0, 1)
         
         formula_used = f"=SUMIFS('{main_ws_name}'!H:H; '{main_ws_name}'!E:E; A{current_row}; '{main_ws_name}'!A:A; TRUE)"
@@ -114,7 +112,6 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         write_range_start = start_row - len(clients_list)
         ws_an.update(range_name=f'A{write_range_start}', values=team_rows, value_input_option='USER_ENTERED')
         start_row += 2
-
 
 # --- 5. ЧТЕНИЕ ДАННЫХ ---
 def load_data():
@@ -178,11 +175,10 @@ CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casi
 PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
 SP_OPTIONS = [1, 2, 3, 5, 8]
 
-# Инициализация настроек (добавлен overhead 20%)
 if 'capacity_settings' not in st.session_state:
     st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21, 'overhead': 20} for dept in DEPARTMENTS}
 
-if st.button("🔄 Обновить данные"):
+if st.button("🔄 Обновить данные из Таблицы"):
     df = load_data()
     client = get_client()
     sync_jira_sheet(client, df)
@@ -222,23 +218,27 @@ if st.session_state.p0_conflict:
             st.rerun()
     st.stop()
 
-# САЙДБАР
+# --- САЙДБАР (ТЕПЕРЬ В ФОРМЕ, ЧТОБЫ ИЗБЕЖАТЬ ОШИБОК GOOGLE API) ---
 st.sidebar.header("⚙️ Ресурсы команд")
-st.sidebar.info("Укажите людей, дни и Threshold (% вычета от капасити).")
-for dept in DEPARTMENTS:
-    with st.sidebar.expander(f"{dept}", expanded=False):
-        # Подгружаем текущие значения или ставим дефолтные
-        cur_p = st.session_state.capacity_settings[dept].get('people', 5)
-        cur_d = st.session_state.capacity_settings[dept].get('days', 21)
-        cur_o = st.session_state.capacity_settings[dept].get('overhead', 20)
-        
-        p = st.number_input(f"{dept}: Человек", 1, 100, cur_p, key=f"p_{dept}")
-        d = st.number_input(f"{dept}: Дней", 1, 60, cur_d, key=f"d_{dept}")
-        o = st.number_input(f"{dept}: Threshold (минус от капасити)", 0, 100, cur_o, key=f"o_{dept}", help="Процент времени, который вычитается из общего капасити")
-        
-        st.session_state.capacity_settings[dept] = {'people': p, 'days': d, 'overhead': o}
+st.sidebar.info("Укажите значения и нажмите 'Пересчитать графики' в самом низу.")
 
-# ФОРМА
+with st.sidebar.form("capacity_form"):
+    for dept in DEPARTMENTS:
+        with st.expander(f"{dept}", expanded=False):
+            cur_p = st.session_state.capacity_settings[dept].get('people', 5)
+            cur_d = st.session_state.capacity_settings[dept].get('days', 21)
+            cur_o = st.session_state.capacity_settings[dept].get('overhead', 20)
+            
+            p = st.number_input(f"{dept}: Человек", 1, 100, cur_p, key=f"p_{dept}")
+            d = st.number_input(f"{dept}: Дней", 1, 60, cur_d, key=f"d_{dept}")
+            o = st.number_input(f"{dept}: Threshold (минус от капасити)", 0, 100, cur_o, key=f"o_{dept}")
+            
+            st.session_state.capacity_settings[dept] = {'people': p, 'days': d, 'overhead': o}
+            
+    # Эта кнопка защитит от "спама" запросами в Google
+    submit_capacity = st.form_submit_button("📊 Пересчитать графики")
+
+# ФОРМА ЗАДАЧИ
 st.subheader("➕ Создание задачи")
 
 with st.form("main_form", clear_on_submit=True):
@@ -269,7 +269,7 @@ with st.form("main_form", clear_on_submit=True):
     dep2_name = st.text_input("Название задачи для Команды №2", key="d2_name")
     dep2_desc = st.text_area("Описание требований №2", height=68, key="d2_desc")
 
-    submitted = st.form_submit_button("Сохранить всё")
+    submitted = st.form_submit_button("Сохранить задачу")
 
     if submitted:
         if not task_name:
@@ -347,7 +347,6 @@ if not df_tasks.empty:
     df_tasks_active = df_tasks[df_tasks['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     df_tasks_active['Оценка (SP)'] = pd.to_numeric(df_tasks_active['Оценка (SP)'], errors='coerce').fillna(0)
     
-    # Считаем реальное капасити для графика
     cap_data = []
     for d, s in st.session_state.capacity_settings.items():
         total = s['people'] * s['days']
@@ -360,7 +359,7 @@ if not df_tasks.empty:
     
     st.subheader("📊 Загрузка команд (С учетом Threshold)")
     fig = go.Figure()
-    # Рисуем серый столбик - Реальное Капасити
+    
     fig.add_trace(go.Bar(x=df_cap['Исполнитель'], y=df_cap['Real Capacity'], name='Real Capacity', marker_color='lightgrey', text=df_cap['Real Capacity'], textposition='auto'))
     
     for t in ['Own Task', 'Incoming Blocker', 'Incoming Enabler']:
