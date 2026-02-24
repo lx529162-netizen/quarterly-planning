@@ -28,29 +28,6 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
-def make_text_bar(val, max_val):
-    try:
-        val = int(val)
-    except:
-        val = 0
-    filled = "█" * val
-    empty = "░" * (max_val - val)
-    return f"{filled} {val}/{max_val}"
-
-def calculate_rice(reach, impact, confidence_str, sp):
-    conf_map = {"100% (Уверен)": 1.0, "80% (Скорее уверен)": 0.8, "50% (Интуиция)": 0.5}
-    conf = conf_map.get(confidence_str, 1.0)
-    
-    try:
-        sp_val = float(sp)
-        if sp_val <= 0: sp_val = 1 
-    except:
-        sp_val = 1
-        
-    rice = (reach * impact * conf * 10) / sp_val 
-    return round(rice, 1)
-
 # --- 3. JIRA SYNC ---
 def sync_jira_sheet(client, df_source):
     if df_source.empty:
@@ -168,9 +145,21 @@ def save_rows(rows_list):
     target_row = last_filled_row + 1
     
     values_to_append = []
-    for row_df in rows_list:
-        values_to_append.append(row_df.values.tolist()[0])
+    for idx, row_df in enumerate(rows_list):
+        row_data = row_df.values.tolist()[0]
+        current_row = target_row + idx
         
+        # Строим живую формулу для колонки H (RICE)
+        # J(10) = Reach, K(11) = Impact, L(12) = Confidence, I(9) = SP
+        # IFERROR скрывает ошибку, если SP пустое. REGEXEXTRACT достает цифру (например 80) из "80% (Скорее уверен)"
+        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * VALUE(REGEXEXTRACT(L{current_row}; "\\d+"))/100 * 10) / I{current_row}; "")'
+        
+        # Подменяем пустышку на настоящую формулу в 8-й колонке (индекс 7)
+        row_data[7] = rice_formula 
+        
+        values_to_append.append(row_data)
+        
+    # ВАЖНО: value_input_option='USER_ENTERED' заставляет Гугл Таблицу воспринять строку с '=' как формулу
     sheet.update(range_name=f'A{target_row}', values=values_to_append, value_input_option='USER_ENTERED')
     
     all_data = load_data()
@@ -320,10 +309,6 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            calculated_rice = calculate_rice(reach_val, impact_val, conf_val, estimate)
-            reach_bar = make_text_bar(reach_val, 10)
-            impact_bar = make_text_bar(impact_val, 5)
-            
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -332,10 +317,10 @@ with st.form("main_form", clear_on_submit=True):
                 'Исполнитель': main_team,
                 'Заказчик': client,
                 'Приоритет': priority,
-                'RICE': calculated_rice,
+                'RICE': "", # Заменится на формулу в save_rows
                 'Оценка (SP)': estimate,
-                'Reach': reach_bar,
-                'Impact': impact_bar,
+                'Reach': reach_val,
+                'Impact': impact_val,
                 'Confidence': conf_val,
                 'Тип': 'Own Task'
             }]))
@@ -351,11 +336,11 @@ with st.form("main_form", clear_on_submit=True):
                         'Исполнитель': dep1_team,
                         'Заказчик': client,
                         'Приоритет': priority,
-                        'RICE': "",
+                        'RICE': "", # Заменится на формулу в save_rows
                         'Оценка (SP)': "",
-                        'Reach': "",
-                        'Impact': "",
-                        'Confidence': "",
+                        'Reach': reach_val, # НАСЛЕДУЕТСЯ
+                        'Impact': impact_val, # НАСЛЕДУЕТСЯ
+                        'Confidence': conf_val, # НАСЛЕДУЕТСЯ
                         'Тип': g_type
                     }]))
             
@@ -370,11 +355,11 @@ with st.form("main_form", clear_on_submit=True):
                         'Исполнитель': dep2_team,
                         'Заказчик': client,
                         'Приоритет': priority,
-                        'RICE': "",
+                        'RICE': "", # Заменится на формулу в save_rows
                         'Оценка (SP)': "",
-                        'Reach': "",
-                        'Impact': "",
-                        'Confidence': "",
+                        'Reach': reach_val, # НАСЛЕДУЕТСЯ
+                        'Impact': impact_val, # НАСЛЕДУЕТСЯ
+                        'Confidence': conf_val, # НАСЛЕДУЕТСЯ
                         'Тип': g_type
                     }]))
 
@@ -392,7 +377,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! Реальное капасити обновлено.")
+            st.success("Данные сохранены! Формулы RICE автоматически добавлены в таблицу.")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
