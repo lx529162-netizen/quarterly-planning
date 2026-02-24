@@ -7,6 +7,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 # 1. Настройка страницы
 st.set_page_config(page_title="Quarterly Planning", layout="wide")
 
+# КОНСТАНТЫ (Перенесли наверх, чтобы использовать при загрузке настроек)
+DEPARTMENTS = ["Data Platform", "BI", "ML", "DA", "DE", "Data Ops", "WAS"]
+CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casino", "Finance Core"]
+PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
+SP_OPTIONS = [1, 2, 3, 5, 8]
+
 # --- 2. ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
 def get_client():
     try:
@@ -28,6 +34,62 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
+# --- 3. РАБОТА С НАСТРОЙКАМИ CAPACITY ---
+def load_capacity_settings(client, departments_list):
+    """Считывает настройки команд из Гугл Таблицы или создает их по умолчанию"""
+    sh = client.open("Quarterly Planning Data")
+    
+    try:
+        ws = sh.worksheet("Capacity_Settings")
+    except:
+        ws = sh.add_worksheet(title="Capacity_Settings", rows=50, cols=4)
+        
+    raw_data = ws.get_all_values()
+    expected_cols = ["Team", "People", "Days", "Threshold"]
+    
+    # Если лист пустой или старый формат - заполняем дефолтными значениями
+    if not raw_data or raw_data[0] != expected_cols:
+        ws.clear()
+        default_rows = [expected_cols]
+        default_settings = {}
+        for dept in departments_list:
+            default_rows.append([dept, 5, 21, 20])
+            default_settings[dept] = {'people': 5, 'days': 21, 'overhead': 20}
+        ws.update(range_name='A1', values=default_rows)
+        return default_settings
+        
+    # Если данные есть - читаем
+    settings = {}
+    for row in raw_data[1:]:
+        if len(row) >= 4:
+            team = row[0]
+            try:
+                p, d, o = int(row[1]), int(row[2]), int(row[3])
+            except ValueError:
+                p, d, o = 5, 21, 20 # Защита от кривого ручного ввода в таблице
+                
+            if team in departments_list:
+                settings[team] = {'people': p, 'days': d, 'overhead': o}
+                
+    # На случай если в код добавили новую команду, а в таблице её еще нет
+    for dept in departments_list:
+        if dept not in settings:
+            settings[dept] = {'people': 5, 'days': 21, 'overhead': 20}
+            
+    return settings
+
+def save_capacity_settings(client, settings_dict):
+    """Сохраняет текущие настройки команд в Гугл Таблицу"""
+    sh = client.open("Quarterly Planning Data")
+    ws = sh.worksheet("Capacity_Settings")
+    
+    rows = [["Team", "People", "Days", "Threshold"]]
+    for team, vals in settings_dict.items():
+        rows.append([team, vals['people'], vals['days'], vals['overhead']])
+        
+    ws.clear()
+    ws.update(range_name='A1', values=rows)
+
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
 def make_text_bar(val, max_val):
     try:
@@ -38,7 +100,7 @@ def make_text_bar(val, max_val):
     empty = "░" * (max_val - val)
     return f"{filled} {val}/{max_val}"
 
-# --- 3. JIRA SYNC ---
+# --- 4. JIRA SYNC ---
 def sync_jira_sheet(client, df_source):
     if df_source.empty:
         return
@@ -74,7 +136,7 @@ def sync_jira_sheet(client, df_source):
     ws_csv.clear()
     ws_csv.update([df_jira.columns.values.tolist()] + df_jira.values.tolist())
 
-# --- 4. ANALYTICS SYNC ---
+# --- 5. ANALYTICS SYNC ---
 def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     sh = client.open("Quarterly Planning Data")
     main_ws_name = sh.sheet1.title
@@ -122,7 +184,7 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         ws_an.update(range_name=f'A{write_range_start}', values=team_rows, value_input_option='USER_ENTERED')
         start_row += 2
 
-# --- 5. ЧТЕНИЕ ДАННЫХ ---
+# --- 6. ЧТЕНИЕ ДАННЫХ ---
 def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
@@ -142,7 +204,7 @@ def load_data():
     df = pd.DataFrame(data, columns=headers)
     return df
 
-# --- 6. СОХРАНЕНИЕ ---
+# --- 7. СОХРАНЕНИЕ ЗАДАЧ ---
 def save_rows(rows_list):
     sheet = get_main_sheet()
     all_values = sheet.get_all_values()
@@ -159,13 +221,9 @@ def save_rows(rows_list):
         row_data = row_df.values.tolist()[0]
         current_row = target_row + idx
         
-        # ОБНОВЛЕННАЯ ФОРМУЛА RICE (Округляем до десятков: параметр -1)
         # J = Reach, K = Impact, L = Confidence (%), I = SP
         rice_formula = f'=IFERROR(ROUND(((J{current_row} * K{current_row} * L{current_row}) / I{current_row}) * 100; -1); "")'
-        
-        # Вставляем формулу в 8-й столбец (индекс 7)
         row_data[7] = rice_formula 
-        
         values_to_append.append(row_data)
         
     sheet.update(range_name=f'A{target_row}', values=values_to_append, value_input_option='USER_ENTERED')
@@ -175,7 +233,7 @@ def save_rows(rows_list):
     sync_jira_sheet(client, all_data)
     update_analytics_tab(client, all_data, st.session_state.capacity_settings, CLIENTS)
 
-# --- 7. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
+# --- 8. ПОНИЖЕНИЕ ПРИОРИТЕТА ---
 def downgrade_existing_p0(executor_team):
     sheet = get_main_sheet()
     all_values = sheet.get_all_values()
@@ -186,20 +244,20 @@ def downgrade_existing_p0(executor_team):
             return True
     return False
 
-# --- 8. ИНТЕРФЕЙС ---
-st.title("📊 Quarterly Planning Tool")
 
-DEPARTMENTS = ["Data Platform", "BI", "ML", "DA", "DE", "Data Ops", "WAS"]
-CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casino", "Finance Core"]
-PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
-SP_OPTIONS = [1, 2, 3, 5, 8]
-
+# --- ИНИЦИАЛИЗАЦИЯ НАСТРОЕК (ИЗ ГУГЛ ТАБЛИЦЫ) ---
 if 'capacity_settings' not in st.session_state:
-    st.session_state.capacity_settings = {dept: {'people': 5, 'days': 21, 'overhead': 20} for dept in DEPARTMENTS}
+    # При первом открытии приложения считываем настройки из Google Sheet
+    st.session_state.capacity_settings = load_capacity_settings(get_client(), DEPARTMENTS)
+
+# --- ИНТЕРФЕЙС ---
+st.title("📊 Quarterly Planning Tool")
 
 if st.button("🔄 Обновить данные из Таблицы"):
     df = load_data()
     client = get_client()
+    # При обновлении также подтягиваем свежие настройки капасити
+    st.session_state.capacity_settings = load_capacity_settings(client, DEPARTMENTS)
     sync_jira_sheet(client, df)
     update_analytics_tab(client, df, st.session_state.capacity_settings, CLIENTS)
     st.rerun()
@@ -237,7 +295,7 @@ if st.session_state.p0_conflict:
             st.rerun()
     st.stop()
 
-# САЙДБАР
+# САЙДБАР (С СОХРАНЕНИЕМ)
 st.sidebar.header("⚙️ Ресурсы команд")
 st.sidebar.info("Укажите значения и нажмите 'Пересчитать графики' в самом низу.")
 
@@ -257,10 +315,13 @@ with st.sidebar.form("capacity_form"):
     submit_capacity = st.form_submit_button("📊 Пересчитать графики")
 
 if submit_capacity:
-    df_for_update = load_data()
     client_for_update = get_client()
+    # СНАЧАЛА СОХРАНЯЕМ В ТАБЛИЦУ НАСТРОЙКИ
+    save_capacity_settings(client_for_update, st.session_state.capacity_settings)
+    # ЗАТЕМ ОБНОВЛЯЕМ АНАЛИТИКУ
+    df_for_update = load_data()
     update_analytics_tab(client_for_update, df_for_update, st.session_state.capacity_settings, CLIENTS)
-    st.sidebar.success("✅ Значения обновлены в Гугл Таблице!")
+    st.sidebar.success("✅ Значения сохранены в таблицу и графики обновлены!")
 
 # ФОРМА ЗАДАЧИ
 st.subheader("➕ Создание задачи")
@@ -291,7 +352,6 @@ with st.form("main_form", clear_on_submit=True):
         conf_val_str = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
         st.caption("Насколько точна наша оценка?")
         
-        # Конвертируем строку в строковый процент для Гугл Таблицы
         conf_map = {"100% (Уверен)": "100%", "80% (Скорее уверен)": "80%", "50% (Интуиция)": "50%"}
         conf_val_num = conf_map.get(conf_val_str, "100%")
         
@@ -321,7 +381,6 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            # Основная задача
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -330,7 +389,7 @@ with st.form("main_form", clear_on_submit=True):
                 'Исполнитель': main_team,
                 'Заказчик': client,
                 'Приоритет': priority,
-                'RICE': "", # Заменится на формулу
+                'RICE': "", 
                 'Оценка (SP)': estimate,
                 'Reach': reach_val,         
                 'Impact': impact_val,       
@@ -338,7 +397,6 @@ with st.form("main_form", clear_on_submit=True):
                 'Тип': 'Own Task'
             }]))
             
-            # Зависимость 1
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -358,7 +416,6 @@ with st.form("main_form", clear_on_submit=True):
                         'Тип': g_type
                     }]))
             
-            # Зависимость 2
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
                 if dep2_name:
                     g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
@@ -392,7 +449,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! Формулы RICE (округленные до десятков) автоматически добавлены в таблицу.")
+            st.success("Данные сохранены! Формулы RICE автоматически добавлены в таблицу.")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
