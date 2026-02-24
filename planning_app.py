@@ -28,6 +28,31 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
+def make_text_bar(val, max_val):
+    """Создает красивый текстовый прогресс-бар для ячеек Гугл Таблицы"""
+    try:
+        val = int(val)
+    except:
+        val = 0
+    filled = "█" * val
+    empty = "░" * (max_val - val)
+    return f"{filled} {val}/{max_val}"
+
+def calculate_rice(reach, impact, confidence_str, sp):
+    """Считает RICE: (Reach * Impact * Confidence) / Effort"""
+    conf_map = {"100% (Уверен)": 1.0, "80% (Скорее уверен)": 0.8, "50% (Интуиция)": 0.5}
+    conf = conf_map.get(confidence_str, 1.0)
+    
+    try:
+        sp_val = float(sp)
+        if sp_val <= 0: sp_val = 1 # Избегаем деления на 0
+    except:
+        sp_val = 1
+        
+    rice = (reach * impact * conf * 10) / sp_val # Умножаем на 10 для красивого числа
+    return round(rice, 1)
+
 # --- 3. JIRA SYNC ---
 def sync_jira_sheet(client, df_source):
     if df_source.empty:
@@ -48,9 +73,12 @@ def sync_jira_sheet(client, df_source):
 
     df_jira = pd.DataFrame()
     df_jira['Summary'] = df_active['Название задачи']
+    
+    # Добавляем RICE в Jira Description
     df_jira['Description'] = df_active['Описание'] + "\n\n" + \
                              "--- Planning Info ---\n" + \
                              "Author: " + df_active['Кто создал задачу'] + "\n" + \
+                             "RICE Score: " + df_active['RICE'].astype(str) + "\n" + \
                              "Type: " + df_active['Тип']
 
     priority_map = {"P0 (Critical)": "Highest", "P1 (High)": "High", "P2 (Medium)": "Medium", "P3 (Low)": "Low"}
@@ -75,7 +103,6 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     
     ws_an.clear()
     
-    # === ТАБЛИЦА 1: CAPACITY ===
     headers_1 = ["Исполнитель", "Real Capacity (с учетом Threshold)", "Занято (Live Formula)", "Остаток"]
     rows_1 = []
     current_row = 2
@@ -85,7 +112,8 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         overhead_percent = settings.get('overhead', 20)
         cap_val = round(total_days * (100 - overhead_percent) / 100.0, 1)
         
-        formula_used = f"=SUMIFS('{main_ws_name}'!H:H; '{main_ws_name}'!E:E; A{current_row}; '{main_ws_name}'!A:A; TRUE)"
+        # Индексы: Исполнитель(E), Оценка SP(I), Берем(A)
+        formula_used = f"=SUMIFS('{main_ws_name}'!I:I; '{main_ws_name}'!E:E; A{current_row}; '{main_ws_name}'!A:A; TRUE)"
         formula_left = f"=B{current_row}-C{current_row}"
         
         rows_1.append([team, cap_val, formula_used, formula_left])
@@ -94,7 +122,6 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
     ws_an.update(range_name='A1', values=[headers_1])
     ws_an.update(range_name='A2', values=rows_1, value_input_option='USER_ENTERED')
     
-    # === ТАБЛИЦЫ ПО КОМАНДАМ ===
     start_row = len(rows_1) + 6
     
     for team in capacity_settings.keys():
@@ -105,7 +132,8 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         
         team_rows = []
         for client_name in clients_list:
-            formula = f"=SUMIFS('{main_ws_name}'!H:H; '{main_ws_name}'!E:E; \"{team}\"; '{main_ws_name}'!F:F; A{start_row}; '{main_ws_name}'!A:A; TRUE)"
+            # Исполнитель(E), Заказчик(F), Оценка SP(I), Берем(A)
+            formula = f"=SUMIFS('{main_ws_name}'!I:I; '{main_ws_name}'!E:E; \"{team}\"; '{main_ws_name}'!F:F; A{start_row}; '{main_ws_name}'!A:A; TRUE)"
             team_rows.append([client_name, formula])
             start_row += 1
             
@@ -118,14 +146,15 @@ def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
-    expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'Оценка (SP)', 'Тип']
+    expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'RICE', 'Оценка (SP)', 'Reach', 'Impact', 'Confidence', 'Тип']
     
     if not raw_data:
         sheet.append_row(expected_cols)
         return pd.DataFrame(columns=expected_cols)
 
     if raw_data[0] != expected_cols:
-        sheet.update(range_name='A1:I1', values=[expected_cols])
+        # Расширили диапазон обновления до столбца M (13-я колонка)
+        sheet.update(range_name='A1:M1', values=[expected_cols])
         raw_data = sheet.get_all_values()
 
     headers = raw_data[0]
@@ -162,8 +191,10 @@ def downgrade_existing_p0(executor_team):
     all_values = sheet.get_all_values()
     for i, row in enumerate(all_values):
         if i == 0: continue
-        if (len(row) > 8 and row[4] == executor_team and row[6] == "P0 (Critical)" and row[8] == "Own Task"):
-            sheet.update_cell(i + 1, 7, "P1 (High)") 
+        # Проверяем индексы с учетом новых колонок
+        # Исполнитель = row[4], Приоритет = row[6], Тип = row[12]
+        if (len(row) > 12 and row[4] == executor_team and row[6] == "P0 (Critical)" and row[12] == "Own Task"):
+            sheet.update_cell(i + 1, 7, "P1 (High)") # 7 = колонка G (Приоритет)
             return True
     return False
 
@@ -218,7 +249,7 @@ if st.session_state.p0_conflict:
             st.rerun()
     st.stop()
 
-# --- САЙДБАР (ТЕПЕРЬ В ФОРМЕ, ЧТОБЫ ИЗБЕЖАТЬ ОШИБОК GOOGLE API) ---
+# САЙДБАР
 st.sidebar.header("⚙️ Ресурсы команд")
 st.sidebar.info("Укажите значения и нажмите 'Пересчитать графики' в самом низу.")
 
@@ -235,8 +266,13 @@ with st.sidebar.form("capacity_form"):
             
             st.session_state.capacity_settings[dept] = {'people': p, 'days': d, 'overhead': o}
             
-    # Эта кнопка защитит от "спама" запросами в Google
     submit_capacity = st.form_submit_button("📊 Пересчитать графики")
+
+if submit_capacity:
+    df_for_update = load_data()
+    client_for_update = get_client()
+    update_analytics_tab(client_for_update, df_for_update, st.session_state.capacity_settings, CLIENTS)
+    st.sidebar.success("✅ Значения обновлены в Гугл Таблице!")
 
 # ФОРМА ЗАДАЧИ
 st.subheader("➕ Создание задачи")
@@ -251,6 +287,20 @@ with st.form("main_form", clear_on_submit=True):
     with col_pr: priority = st.selectbox("Приоритет", PRIORITIES, index=2)
     with col_sp: estimate = st.select_slider("Оценка в SP (Своей задачи)", options=SP_OPTIONS, value=1)
 
+    st.markdown("---")
+    
+    # === НОВЫЙ БЛОК RICE ===
+    st.markdown("### 🔬 RICE Оценка (Интуитивно)")
+    st.caption("Помогает алгоритму понять ценность. Укажите интуитивно, система сама посчитает и добавит SP.")
+    
+    col_r, col_i, col_c = st.columns(3)
+    with col_r:
+        reach_val = st.slider("Охват (Reach)", min_value=1, max_value=10, value=5, help="Сколько пользователей затронет? 1 = единицы, 10 = абсолютно все.")
+    with col_i:
+        impact_val = st.slider("Влияние (Impact)", min_value=1, max_value=5, value=3, help="Какую пользу принесет? 1 = незаметно, 5 = критически важно.")
+    with col_c:
+        conf_val = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
+    
     st.markdown("---")
     
     st.markdown("### 🔗 Зависимость №1")
@@ -277,6 +327,11 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
+            # Считаем RICE и графики для основной задачи
+            calculated_rice = calculate_rice(reach_val, impact_val, conf_val, estimate)
+            reach_bar = make_text_bar(reach_val, 10)
+            impact_bar = make_text_bar(impact_val, 5)
+            
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -285,90 +340,19 @@ with st.form("main_form", clear_on_submit=True):
                 'Исполнитель': main_team,
                 'Заказчик': client,
                 'Приоритет': priority,
+                'RICE': calculated_rice,
                 'Оценка (SP)': estimate,
+                'Reach': reach_bar,
+                'Impact': impact_bar,
+                'Confidence': conf_val,
                 'Тип': 'Own Task'
             }]))
             
+            # Для зависимостей RICE и SP оставляем пустыми (они оценят сами)
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
                     rows_to_save.append(pd.DataFrame([{
                         'Берем': 'TRUE',
                         'Название задачи': dep1_name,
-                        'Описание': dep1_desc,
-                        'Кто создал задачу': main_team,
-                        'Исполнитель': dep1_team,
-                        'Заказчик': client,
-                        'Приоритет': priority,
-                        'Оценка (SP)': "",
-                        'Тип': g_type
-                    }]))
-            
-            if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
-                if dep2_name:
-                    g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
-                    rows_to_save.append(pd.DataFrame([{
-                        'Берем': 'TRUE',
-                        'Название задачи': dep2_name,
-                        'Описание': dep2_desc,
-                        'Кто создал задачу': main_team,
-                        'Исполнитель': dep2_team,
-                        'Заказчик': client,
-                        'Приоритет': priority,
-                        'Оценка (SP)': "",
-                        'Тип': g_type
-                    }]))
-
-            if priority == "P0 (Critical)":
-                current_df = load_data()
-                existing_p0 = current_df[
-                    (current_df['Исполнитель'] == main_team) & 
-                    (current_df['Приоритет'] == 'P0 (Critical)') &
-                    (current_df['Тип'] == 'Own Task') &
-                    (current_df['Берем'].astype(str).str.upper() == 'TRUE')
-                ]
-                if not existing_p0.empty:
-                    st.session_state.p0_conflict = True
-                    st.session_state.pending_rows = rows_to_save
-                    st.rerun()
-            
-            save_rows(rows_to_save)
-            st.success("Данные сохранены! Реальное капасити обновлено.")
-            st.rerun()
-
-# АНАЛИТИКА (ГРАФИКИ)
-try:
-    df_tasks = load_data()
-except:
-    df_tasks = pd.DataFrame()
-
-if not df_tasks.empty:
-    st.divider()
-    df_tasks_active = df_tasks[df_tasks['Берем'].astype(str).str.upper() == 'TRUE'].copy()
-    df_tasks_active['Оценка (SP)'] = pd.to_numeric(df_tasks_active['Оценка (SP)'], errors='coerce').fillna(0)
-    
-    cap_data = []
-    for d, s in st.session_state.capacity_settings.items():
-        total = s['people'] * s['days']
-        overhead = s.get('overhead', 20)
-        real_cap = round(total * (100 - overhead) / 100.0, 1)
-        cap_data.append({'Исполнитель': d, 'Real Capacity': real_cap})
-        
-    df_cap = pd.DataFrame(cap_data)
-    usage = df_tasks_active.groupby(['Исполнитель', 'Тип'])['Оценка (SP)'].sum().reset_index()
-    
-    st.subheader("📊 Загрузка команд (С учетом Threshold)")
-    fig = go.Figure()
-    
-    fig.add_trace(go.Bar(x=df_cap['Исполнитель'], y=df_cap['Real Capacity'], name='Real Capacity', marker_color='lightgrey', text=df_cap['Real Capacity'], textposition='auto'))
-    
-    for t in ['Own Task', 'Incoming Blocker', 'Incoming Enabler']:
-        sub = usage[usage['Тип'] == t]
-        if not sub.empty:
-            fig.add_trace(go.Bar(x=sub['Исполнитель'], y=sub['Оценка (SP)'], name=t, text=sub['Оценка (SP)'], textposition='inside'))
-            
-    fig.update_layout(barmode='overlay', title="Real Capacity vs Workload")
-    st.plotly_chart(fig, use_container_width=True)
-    
-    st.subheader("📋 Список всех задач")
-    st.dataframe(df_tasks, use_container_width=True)
+                        '
