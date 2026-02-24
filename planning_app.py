@@ -28,7 +28,7 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
 def make_text_bar(val, max_val):
     try:
         val = int(val)
@@ -49,7 +49,6 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
-    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -160,9 +159,9 @@ def save_rows(rows_list):
         row_data = row_df.values.tolist()[0]
         current_row = target_row + idx
         
-        # ОБНОВЛЕННАЯ ФОРМУЛА RICE (Умножаем на 100 и округляем до десятых)
+        # ОБНОВЛЕННАЯ ФОРМУЛА RICE (Округляем до десятков: параметр -1)
         # J = Reach, K = Impact, L = Confidence (%), I = SP
-        rice_formula = f'=IFERROR(ROUND(((J{current_row} * K{current_row} * L{current_row}) / I{current_row}) * 100; 1); "")'
+        rice_formula = f'=IFERROR(ROUND(((J{current_row} * K{current_row} * L{current_row}) / I{current_row}) * 100; -1); "")'
         
         # Вставляем формулу в 8-й столбец (индекс 7)
         row_data[7] = rice_formula 
@@ -393,7 +392,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! Формулы RICE автоматически добавлены в таблицу.")
+            st.success("Данные сохранены! Формулы RICE (округленные до десятков) автоматически добавлены в таблицу.")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
