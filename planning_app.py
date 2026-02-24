@@ -28,6 +28,16 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
+def make_text_bar(val, max_val):
+    try:
+        val = int(val)
+    except:
+        val = 0
+    filled = "█" * val
+    empty = "░" * (max_val - val)
+    return f"{filled} {val}/{max_val}"
+
 # --- 3. JIRA SYNC ---
 def sync_jira_sheet(client, df_source):
     if df_source.empty:
@@ -39,7 +49,6 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
-    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -150,9 +159,9 @@ def save_rows(rows_list):
         row_data = row_df.values.tolist()[0]
         current_row = target_row + idx
         
-        # ЧИСТАЯ МАТЕМАТИЧЕСКАЯ ФОРМУЛА RICE (без текста и парсинга)
-        # J = Reach, K = Impact, L = Confidence (число), I = SP
-        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * L{current_row}/100) / I{current_row}; "")'
+        # ЧИСТАЯ МАТЕМАТИЧЕСКАЯ ФОРМУЛА RICE (Учли что L - это уже процент)
+        # J = Reach, K = Impact, L = Confidence (%), I = SP
+        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * L{current_row}) / I{current_row}; "")'
         
         # Вставляем формулу в 8-й столбец (индекс 7)
         row_data[7] = rice_formula 
@@ -282,9 +291,9 @@ with st.form("main_form", clear_on_submit=True):
         conf_val_str = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
         st.caption("Насколько точна наша оценка?")
         
-        # Конвертируем строку в чистое число для Гугл Таблицы
-        conf_map = {"100% (Уверен)": 100, "80% (Скорее уверен)": 80, "50% (Интуиция)": 50}
-        conf_val_num = conf_map.get(conf_val_str, 100)
+        # Конвертируем строку в строковый процент для Гугл Таблицы
+        conf_map = {"100% (Уверен)": "100%", "80% (Скорее уверен)": "80%", "50% (Интуиция)": "50%"}
+        conf_val_num = conf_map.get(conf_val_str, "100%")
         
     st.markdown("---")
     
@@ -323,9 +332,9 @@ with st.form("main_form", clear_on_submit=True):
                 'Приоритет': priority,
                 'RICE': "", # Заменится на формулу
                 'Оценка (SP)': estimate,
-                'Reach': reach_val,         # Чистое число
-                'Impact': impact_val,       # Чистое число
-                'Confidence': conf_val_num, # Чистое число
+                'Reach': reach_val,         
+                'Impact': impact_val,       
+                'Confidence': conf_val_num, # Отправляем значение с % (например "100%")
                 'Тип': 'Own Task'
             }]))
             
@@ -343,9 +352,9 @@ with st.form("main_form", clear_on_submit=True):
                         'Приоритет': priority,
                         'RICE': "", 
                         'Оценка (SP)': "",
-                        'Reach': reach_val,         # Наследуется
-                        'Impact': impact_val,       # Наследуется
-                        'Confidence': conf_val_num, # Наследуется
+                        'Reach': reach_val,         
+                        'Impact': impact_val,       
+                        'Confidence': conf_val_num, 
                         'Тип': g_type
                     }]))
             
@@ -363,9 +372,9 @@ with st.form("main_form", clear_on_submit=True):
                         'Приоритет': priority,
                         'RICE': "", 
                         'Оценка (SP)': "",
-                        'Reach': reach_val,         # Наследуется
-                        'Impact': impact_val,       # Наследуется
-                        'Confidence': conf_val_num, # Наследуется
+                        'Reach': reach_val,         
+                        'Impact': impact_val,       
+                        'Confidence': conf_val_num, 
                         'Тип': g_type
                     }]))
 
