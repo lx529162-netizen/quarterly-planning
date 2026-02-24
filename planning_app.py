@@ -39,6 +39,7 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
+    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -149,17 +150,15 @@ def save_rows(rows_list):
         row_data = row_df.values.tolist()[0]
         current_row = target_row + idx
         
-        # Строим живую формулу для колонки H (RICE)
-        # J(10) = Reach, K(11) = Impact, L(12) = Confidence, I(9) = SP
-        # IFERROR скрывает ошибку, если SP пустое. REGEXEXTRACT достает цифру (например 80) из "80% (Скорее уверен)"
-        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * VALUE(REGEXEXTRACT(L{current_row}; "\\d+"))/100 * 10) / I{current_row}; "")'
+        # ЧИСТАЯ МАТЕМАТИЧЕСКАЯ ФОРМУЛА RICE (без текста и парсинга)
+        # J = Reach, K = Impact, L = Confidence (число), I = SP
+        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * L{current_row}/100) / I{current_row}; "")'
         
-        # Подменяем пустышку на настоящую формулу в 8-й колонке (индекс 7)
+        # Вставляем формулу в 8-й столбец (индекс 7)
         row_data[7] = rice_formula 
         
         values_to_append.append(row_data)
         
-    # ВАЖНО: value_input_option='USER_ENTERED' заставляет Гугл Таблицу воспринять строку с '=' как формулу
     sheet.update(range_name=f'A{target_row}', values=values_to_append, value_input_option='USER_ENTERED')
     
     all_data = load_data()
@@ -280,8 +279,12 @@ with st.form("main_form", clear_on_submit=True):
         impact_val = st.slider("Влияние (Impact)", min_value=1, max_value=5, value=3)
         st.caption("Какая польза бизнесу или архитектуре? (1 = минорный рефакторинг, 5 = спасение прода / х10 ускорение / прямой доход)")
     with col_c:
-        conf_val = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
+        conf_val_str = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
         st.caption("Насколько точна наша оценка?")
+        
+        # Конвертируем строку в чистое число для Гугл Таблицы
+        conf_map = {"100% (Уверен)": 100, "80% (Скорее уверен)": 80, "50% (Интуиция)": 50}
+        conf_val_num = conf_map.get(conf_val_str, 100)
         
     st.markdown("---")
     
@@ -309,6 +312,7 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
+            # Основная задача
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -317,14 +321,15 @@ with st.form("main_form", clear_on_submit=True):
                 'Исполнитель': main_team,
                 'Заказчик': client,
                 'Приоритет': priority,
-                'RICE': "", # Заменится на формулу в save_rows
+                'RICE': "", # Заменится на формулу
                 'Оценка (SP)': estimate,
-                'Reach': reach_val,
-                'Impact': impact_val,
-                'Confidence': conf_val,
+                'Reach': reach_val,         # Чистое число
+                'Impact': impact_val,       # Чистое число
+                'Confidence': conf_val_num, # Чистое число
                 'Тип': 'Own Task'
             }]))
             
+            # Зависимость 1 (НАСЛЕДУЕТ Reach, Impact, Confidence)
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -336,14 +341,15 @@ with st.form("main_form", clear_on_submit=True):
                         'Исполнитель': dep1_team,
                         'Заказчик': client,
                         'Приоритет': priority,
-                        'RICE': "", # Заменится на формулу в save_rows
+                        'RICE': "", 
                         'Оценка (SP)': "",
-                        'Reach': reach_val, # НАСЛЕДУЕТСЯ
-                        'Impact': impact_val, # НАСЛЕДУЕТСЯ
-                        'Confidence': conf_val, # НАСЛЕДУЕТСЯ
+                        'Reach': reach_val,         # Наследуется
+                        'Impact': impact_val,       # Наследуется
+                        'Confidence': conf_val_num, # Наследуется
                         'Тип': g_type
                     }]))
             
+            # Зависимость 2 (НАСЛЕДУЕТ Reach, Impact, Confidence)
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
                 if dep2_name:
                     g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
@@ -355,11 +361,11 @@ with st.form("main_form", clear_on_submit=True):
                         'Исполнитель': dep2_team,
                         'Заказчик': client,
                         'Приоритет': priority,
-                        'RICE': "", # Заменится на формулу в save_rows
+                        'RICE': "", 
                         'Оценка (SP)': "",
-                        'Reach': reach_val, # НАСЛЕДУЕТСЯ
-                        'Impact': impact_val, # НАСЛЕДУЕТСЯ
-                        'Confidence': conf_val, # НАСЛЕДУЕТСЯ
+                        'Reach': reach_val,         # Наследуется
+                        'Impact': impact_val,       # Наследуется
+                        'Confidence': conf_val_num, # Наследуется
                         'Тип': g_type
                     }]))
 
