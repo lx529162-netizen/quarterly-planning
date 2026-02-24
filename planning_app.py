@@ -30,7 +30,6 @@ def get_main_sheet():
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
 def make_text_bar(val, max_val):
-    """Создает красивый текстовый прогресс-бар для ячеек Гугл Таблицы"""
     try:
         val = int(val)
     except:
@@ -40,17 +39,16 @@ def make_text_bar(val, max_val):
     return f"{filled} {val}/{max_val}"
 
 def calculate_rice(reach, impact, confidence_str, sp):
-    """Считает RICE: (Reach * Impact * Confidence) / Effort"""
     conf_map = {"100% (Уверен)": 1.0, "80% (Скорее уверен)": 0.8, "50% (Интуиция)": 0.5}
     conf = conf_map.get(confidence_str, 1.0)
     
     try:
         sp_val = float(sp)
-        if sp_val <= 0: sp_val = 1 # Избегаем деления на 0
+        if sp_val <= 0: sp_val = 1 
     except:
         sp_val = 1
         
-    rice = (reach * impact * conf * 10) / sp_val # Умножаем на 10 для красивого числа
+    rice = (reach * impact * conf * 10) / sp_val 
     return round(rice, 1)
 
 # --- 3. JIRA SYNC ---
@@ -64,7 +62,6 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
-    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -74,7 +71,6 @@ def sync_jira_sheet(client, df_source):
     df_jira = pd.DataFrame()
     df_jira['Summary'] = df_active['Название задачи']
     
-    # Добавляем RICE в Jira Description
     df_jira['Description'] = df_active['Описание'] + "\n\n" + \
                              "--- Planning Info ---\n" + \
                              "Author: " + df_active['Кто создал задачу'] + "\n" + \
@@ -112,7 +108,6 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         overhead_percent = settings.get('overhead', 20)
         cap_val = round(total_days * (100 - overhead_percent) / 100.0, 1)
         
-        # Индексы: Исполнитель(E), Оценка SP(I), Берем(A)
         formula_used = f"=SUMIFS('{main_ws_name}'!I:I; '{main_ws_name}'!E:E; A{current_row}; '{main_ws_name}'!A:A; TRUE)"
         formula_left = f"=B{current_row}-C{current_row}"
         
@@ -132,7 +127,6 @@ def update_analytics_tab(client, df_tasks, capacity_settings, clients_list):
         
         team_rows = []
         for client_name in clients_list:
-            # Исполнитель(E), Заказчик(F), Оценка SP(I), Берем(A)
             formula = f"=SUMIFS('{main_ws_name}'!I:I; '{main_ws_name}'!E:E; \"{team}\"; '{main_ws_name}'!F:F; A{start_row}; '{main_ws_name}'!A:A; TRUE)"
             team_rows.append([client_name, formula])
             start_row += 1
@@ -153,7 +147,6 @@ def load_data():
         return pd.DataFrame(columns=expected_cols)
 
     if raw_data[0] != expected_cols:
-        # Расширили диапазон обновления до столбца M (13-я колонка)
         sheet.update(range_name='A1:M1', values=[expected_cols])
         raw_data = sheet.get_all_values()
 
@@ -191,10 +184,8 @@ def downgrade_existing_p0(executor_team):
     all_values = sheet.get_all_values()
     for i, row in enumerate(all_values):
         if i == 0: continue
-        # Проверяем индексы с учетом новых колонок
-        # Исполнитель = row[4], Приоритет = row[6], Тип = row[12]
         if (len(row) > 12 and row[4] == executor_team and row[6] == "P0 (Critical)" and row[12] == "Own Task"):
-            sheet.update_cell(i + 1, 7, "P1 (High)") # 7 = колонка G (Приоритет)
+            sheet.update_cell(i + 1, 7, "P1 (High)") 
             return True
     return False
 
@@ -289,18 +280,20 @@ with st.form("main_form", clear_on_submit=True):
 
     st.markdown("---")
     
-    # === НОВЫЙ БЛОК RICE ===
+    # === БЛОК RICE ===
     st.markdown("### 🔬 RICE Оценка (Интуитивно)")
-    st.caption("Помогает алгоритму понять ценность. Укажите интуитивно, система сама посчитает и добавит SP.")
     
     col_r, col_i, col_c = st.columns(3)
     with col_r:
-        reach_val = st.slider("Охват (Reach)", min_value=1, max_value=10, value=5, help="Сколько пользователей затронет? 1 = единицы, 10 = абсолютно все.")
+        reach_val = st.slider("Охват (Reach)", min_value=1, max_value=10, value=5)
+        st.caption("Сколько дашбордов, витрин или систем затронет? (1 = один ad-hoc отчет, 10 = всё DWH или ключевой пайплайн)")
     with col_i:
-        impact_val = st.slider("Влияние (Impact)", min_value=1, max_value=5, value=3, help="Какую пользу принесет? 1 = незаметно, 5 = критически важно.")
+        impact_val = st.slider("Влияние (Impact)", min_value=1, max_value=5, value=3)
+        st.caption("Какая польза бизнесу или архитектуре? (1 = минорный рефакторинг, 5 = спасение прода / х10 ускорение / прямой доход)")
     with col_c:
         conf_val = st.selectbox("Уверенность (Confidence)", ["100% (Уверен)", "80% (Скорее уверен)", "50% (Интуиция)"])
-    
+        st.caption("Насколько точна наша оценка?")
+        
     st.markdown("---")
     
     st.markdown("### 🔗 Зависимость №1")
@@ -327,7 +320,6 @@ with st.form("main_form", clear_on_submit=True):
         else:
             rows_to_save = []
             
-            # Считаем RICE и графики для основной задачи
             calculated_rice = calculate_rice(reach_val, impact_val, conf_val, estimate)
             reach_bar = make_text_bar(reach_val, 10)
             impact_bar = make_text_bar(impact_val, 5)
@@ -348,7 +340,6 @@ with st.form("main_form", clear_on_submit=True):
                 'Тип': 'Own Task'
             }]))
             
-            # Для зависимостей RICE и SP оставляем пустыми (они оценят сами)
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -401,7 +392,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные и RICE оценка сохранены!")
+            st.success("Данные сохранены! Реальное капасити обновлено.")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
