@@ -355,4 +355,88 @@ with st.form("main_form", clear_on_submit=True):
                     rows_to_save.append(pd.DataFrame([{
                         'Берем': 'TRUE',
                         'Название задачи': dep1_name,
-                        '
+                        'Описание': dep1_desc,
+                        'Кто создал задачу': main_team,
+                        'Исполнитель': dep1_team,
+                        'Заказчик': client,
+                        'Приоритет': priority,
+                        'RICE': "",
+                        'Оценка (SP)': "",
+                        'Reach': "",
+                        'Impact': "",
+                        'Confidence': "",
+                        'Тип': g_type
+                    }]))
+            
+            if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
+                if dep2_name:
+                    g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
+                    rows_to_save.append(pd.DataFrame([{
+                        'Берем': 'TRUE',
+                        'Название задачи': dep2_name,
+                        'Описание': dep2_desc,
+                        'Кто создал задачу': main_team,
+                        'Исполнитель': dep2_team,
+                        'Заказчик': client,
+                        'Приоритет': priority,
+                        'RICE': "",
+                        'Оценка (SP)': "",
+                        'Reach': "",
+                        'Impact': "",
+                        'Confidence': "",
+                        'Тип': g_type
+                    }]))
+
+            if priority == "P0 (Critical)":
+                current_df = load_data()
+                existing_p0 = current_df[
+                    (current_df['Исполнитель'] == main_team) & 
+                    (current_df['Приоритет'] == 'P0 (Critical)') &
+                    (current_df['Тип'] == 'Own Task') &
+                    (current_df['Берем'].astype(str).str.upper() == 'TRUE')
+                ]
+                if not existing_p0.empty:
+                    st.session_state.p0_conflict = True
+                    st.session_state.pending_rows = rows_to_save
+                    st.rerun()
+            
+            save_rows(rows_to_save)
+            st.success("Данные и RICE оценка сохранены!")
+            st.rerun()
+
+# АНАЛИТИКА (ГРАФИКИ)
+try:
+    df_tasks = load_data()
+except:
+    df_tasks = pd.DataFrame()
+
+if not df_tasks.empty:
+    st.divider()
+    df_tasks_active = df_tasks[df_tasks['Берем'].astype(str).str.upper() == 'TRUE'].copy()
+    df_tasks_active['Оценка (SP)'] = pd.to_numeric(df_tasks_active['Оценка (SP)'], errors='coerce').fillna(0)
+    
+    cap_data = []
+    for d, s in st.session_state.capacity_settings.items():
+        total = s['people'] * s['days']
+        overhead = s.get('overhead', 20)
+        real_cap = round(total * (100 - overhead) / 100.0, 1)
+        cap_data.append({'Исполнитель': d, 'Real Capacity': real_cap})
+        
+    df_cap = pd.DataFrame(cap_data)
+    usage = df_tasks_active.groupby(['Исполнитель', 'Тип'])['Оценка (SP)'].sum().reset_index()
+    
+    st.subheader("📊 Загрузка команд (С учетом Threshold)")
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(x=df_cap['Исполнитель'], y=df_cap['Real Capacity'], name='Real Capacity', marker_color='lightgrey', text=df_cap['Real Capacity'], textposition='auto'))
+    
+    for t in ['Own Task', 'Incoming Blocker', 'Incoming Enabler']:
+        sub = usage[usage['Тип'] == t]
+        if not sub.empty:
+            fig.add_trace(go.Bar(x=sub['Исполнитель'], y=sub['Оценка (SP)'], name=t, text=sub['Оценка (SP)'], textposition='inside'))
+            
+    fig.update_layout(barmode='overlay', title="Real Capacity vs Workload")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.subheader("📋 Список всех задач")
+    st.dataframe(df_tasks, use_container_width=True)
