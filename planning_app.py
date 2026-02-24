@@ -28,7 +28,7 @@ def get_main_sheet():
     client = get_client()
     return client.open("Quarterly Planning Data").sheet1
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ RICE ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def make_text_bar(val, max_val):
     try:
         val = int(val)
@@ -49,6 +49,7 @@ def sync_jira_sheet(client, df_source):
     except:
         ws_csv = sh.add_worksheet(title="csv", rows=1000, cols=20)
 
+    # Фильтруем только задачи с галочкой "Берем"
     df_active = df_source[df_source['Берем'].astype(str).str.upper() == 'TRUE'].copy()
     
     if df_active.empty:
@@ -159,9 +160,9 @@ def save_rows(rows_list):
         row_data = row_df.values.tolist()[0]
         current_row = target_row + idx
         
-        # ЧИСТАЯ МАТЕМАТИЧЕСКАЯ ФОРМУЛА RICE (Учли что L - это уже процент)
+        # ОБНОВЛЕННАЯ ФОРМУЛА RICE (Умножаем на 100 и округляем до десятых)
         # J = Reach, K = Impact, L = Confidence (%), I = SP
-        rice_formula = f'=IFERROR((J{current_row} * K{current_row} * L{current_row}) / I{current_row}; "")'
+        rice_formula = f'=IFERROR(ROUND(((J{current_row} * K{current_row} * L{current_row}) / I{current_row}) * 100; 1); "")'
         
         # Вставляем формулу в 8-й столбец (индекс 7)
         row_data[7] = rice_formula 
@@ -334,11 +335,11 @@ with st.form("main_form", clear_on_submit=True):
                 'Оценка (SP)': estimate,
                 'Reach': reach_val,         
                 'Impact': impact_val,       
-                'Confidence': conf_val_num, # Отправляем значение с % (например "100%")
+                'Confidence': conf_val_num, 
                 'Тип': 'Own Task'
             }]))
             
-            # Зависимость 1 (НАСЛЕДУЕТ Reach, Impact, Confidence)
+            # Зависимость 1
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -358,7 +359,7 @@ with st.form("main_form", clear_on_submit=True):
                         'Тип': g_type
                     }]))
             
-            # Зависимость 2 (НАСЛЕДУЕТ Reach, Impact, Confidence)
+            # Зависимость 2
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
                 if dep2_name:
                     g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
