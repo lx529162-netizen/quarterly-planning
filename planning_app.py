@@ -3,11 +3,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import datetime
 
 # 1. Настройка страницы
 st.set_page_config(page_title="Quarterly Planning", layout="wide")
 
-# КОНСТАНТЫ (Перенесли наверх, чтобы использовать при загрузке настроек)
+# КОНСТАНТЫ
 DEPARTMENTS = ["Data Platform", "BI", "ML", "DA", "DE", "Data Ops", "WAS"]
 CLIENTS = ["Data Department", "Partners", "Global Admin Panel", "Betting", "Casino", "Finance Core"]
 PRIORITIES = ["P0 (Critical)", "P1 (High)", "P2 (Medium)", "P3 (Low)"]
@@ -36,7 +37,6 @@ def get_main_sheet():
 
 # --- 3. РАБОТА С НАСТРОЙКАМИ CAPACITY ---
 def load_capacity_settings(client, departments_list):
-    """Считывает настройки команд из Гугл Таблицы или создает их по умолчанию"""
     sh = client.open("Quarterly Planning Data")
     
     try:
@@ -47,7 +47,6 @@ def load_capacity_settings(client, departments_list):
     raw_data = ws.get_all_values()
     expected_cols = ["Team", "People", "Days", "Threshold"]
     
-    # Если лист пустой или старый формат - заполняем дефолтными значениями
     if not raw_data or raw_data[0] != expected_cols:
         ws.clear()
         default_rows = [expected_cols]
@@ -58,7 +57,6 @@ def load_capacity_settings(client, departments_list):
         ws.update(range_name='A1', values=default_rows)
         return default_settings
         
-    # Если данные есть - читаем
     settings = {}
     for row in raw_data[1:]:
         if len(row) >= 4:
@@ -66,12 +64,11 @@ def load_capacity_settings(client, departments_list):
             try:
                 p, d, o = int(row[1]), int(row[2]), int(row[3])
             except ValueError:
-                p, d, o = 5, 21, 20 # Защита от кривого ручного ввода в таблице
+                p, d, o = 5, 21, 20
                 
             if team in departments_list:
                 settings[team] = {'people': p, 'days': d, 'overhead': o}
                 
-    # На случай если в код добавили новую команду, а в таблице её еще нет
     for dept in departments_list:
         if dept not in settings:
             settings[dept] = {'people': 5, 'days': 21, 'overhead': 20}
@@ -79,7 +76,6 @@ def load_capacity_settings(client, departments_list):
     return settings
 
 def save_capacity_settings(client, settings_dict):
-    """Сохраняет текущие настройки команд в Гугл Таблицу"""
     sh = client.open("Quarterly Planning Data")
     ws = sh.worksheet("Capacity_Settings")
     
@@ -120,10 +116,13 @@ def sync_jira_sheet(client, df_source):
     df_jira = pd.DataFrame()
     df_jira['Summary'] = df_active['Название задачи']
     
+    # Добавили даты в описание для Jira
     df_jira['Description'] = df_active['Описание'] + "\n\n" + \
                              "--- Planning Info ---\n" + \
                              "Author: " + df_active['Кто создал задачу'] + "\n" + \
                              "RICE Score: " + df_active['RICE'].astype(str) + "\n" + \
+                             "Start: " + df_active['Start date'].astype(str) + "\n" + \
+                             "End: " + df_active['End date'].astype(str) + "\n" + \
                              "Type: " + df_active['Тип']
 
     priority_map = {"P0 (Critical)": "Highest", "P1 (High)": "High", "P2 (Medium)": "Medium", "P3 (Low)": "Low"}
@@ -189,14 +188,16 @@ def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
-    expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'RICE', 'Оценка (SP)', 'Reach', 'Impact', 'Confidence', 'Тип']
+    # Добавлены Start date и End date
+    expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'RICE', 'Оценка (SP)', 'Reach', 'Impact', 'Confidence', 'Тип', 'Start date', 'End date']
     
     if not raw_data:
         sheet.append_row(expected_cols)
         return pd.DataFrame(columns=expected_cols)
 
     if raw_data[0] != expected_cols:
-        sheet.update(range_name='A1:M1', values=[expected_cols])
+        # Обновляем заголовки до колонки O (15-я колонка)
+        sheet.update(range_name='A1:O1', values=[expected_cols])
         raw_data = sheet.get_all_values()
 
     headers = raw_data[0]
@@ -244,10 +245,8 @@ def downgrade_existing_p0(executor_team):
             return True
     return False
 
-
 # --- ИНИЦИАЛИЗАЦИЯ НАСТРОЕК (ИЗ ГУГЛ ТАБЛИЦЫ) ---
 if 'capacity_settings' not in st.session_state:
-    # При первом открытии приложения считываем настройки из Google Sheet
     st.session_state.capacity_settings = load_capacity_settings(get_client(), DEPARTMENTS)
 
 # --- ИНТЕРФЕЙС ---
@@ -256,7 +255,6 @@ st.title("📊 Quarterly Planning Tool")
 if st.button("🔄 Обновить данные из Таблицы"):
     df = load_data()
     client = get_client()
-    # При обновлении также подтягиваем свежие настройки капасити
     st.session_state.capacity_settings = load_capacity_settings(client, DEPARTMENTS)
     sync_jira_sheet(client, df)
     update_analytics_tab(client, df, st.session_state.capacity_settings, CLIENTS)
@@ -316,9 +314,7 @@ with st.sidebar.form("capacity_form"):
 
 if submit_capacity:
     client_for_update = get_client()
-    # СНАЧАЛА СОХРАНЯЕМ В ТАБЛИЦУ НАСТРОЙКИ
     save_capacity_settings(client_for_update, st.session_state.capacity_settings)
-    # ЗАТЕМ ОБНОВЛЯЕМ АНАЛИТИКУ
     df_for_update = load_data()
     update_analytics_tab(client_for_update, df_for_update, st.session_state.capacity_settings, CLIENTS)
     st.sidebar.success("✅ Значения сохранены в таблицу и графики обновлены!")
@@ -335,6 +331,17 @@ with st.form("main_form", clear_on_submit=True):
     with col_cl: client = st.selectbox("Заказчик (Стрим/Продукт)", CLIENTS)
     with col_pr: priority = st.selectbox("Приоритет", PRIORITIES, index=2)
     with col_sp: estimate = st.select_slider("Оценка в SP (Своей задачи)", options=SP_OPTIONS, value=1)
+
+    st.markdown("---")
+    
+    # === БЛОК ДАТ ===
+    st.markdown("### 🗓 Сроки (Необязательно)")
+    st.caption("Если оставить пустыми, система начнет задачу со следующего месяца и прибавит SP.")
+    col_sd, col_ed = st.columns(2)
+    with col_sd:
+        start_date_input = st.date_input("Дата начала (Start date)", value=None, format="DD.MM.YYYY")
+    with col_ed:
+        end_date_input = st.date_input("Дата конца (End date)", value=None, format="DD.MM.YYYY")
 
     st.markdown("---")
     
@@ -379,8 +386,36 @@ with st.form("main_form", clear_on_submit=True):
         if not task_name:
             st.error("Введите название основной задачи!")
         else:
+            # === РАСЧЕТ ДАТ ===
+            today = datetime.date.today()
+            if today.month == 12:
+                next_month_start = datetime.date(today.year + 1, 1, 1)
+            else:
+                next_month_start = datetime.date(today.year, today.month + 1, 1)
+
+            sp_val = int(estimate)
+
+            # Логика расчета дат в зависимости от того, что ввел пользователь
+            if start_date_input is None and end_date_input is None:
+                final_start = next_month_start
+                final_end = final_start + datetime.timedelta(days=sp_val)
+            elif start_date_input is None and end_date_input is not None:
+                final_end = end_date_input
+                final_start = final_end - datetime.timedelta(days=sp_val)
+            elif start_date_input is not None and end_date_input is None:
+                final_start = start_date_input
+                final_end = final_start + datetime.timedelta(days=sp_val)
+            else:
+                final_start = start_date_input
+                final_end = end_date_input
+
+            # Форматируем в строку (YYYY-MM-DD) для Гугл Таблицы
+            str_start = final_start.strftime("%Y-%m-%d")
+            str_end = final_end.strftime("%Y-%m-%d")
+
             rows_to_save = []
             
+            # Основная задача
             rows_to_save.append(pd.DataFrame([{
                 'Берем': 'TRUE', 
                 'Название задачи': task_name,
@@ -394,9 +429,12 @@ with st.form("main_form", clear_on_submit=True):
                 'Reach': reach_val,         
                 'Impact': impact_val,       
                 'Confidence': conf_val_num, 
-                'Тип': 'Own Task'
+                'Тип': 'Own Task',
+                'Start date': str_start,
+                'End date': str_end
             }]))
             
+            # Зависимости (Даты оставляем пустыми, так как планировать их будет другая команда)
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -413,7 +451,9 @@ with st.form("main_form", clear_on_submit=True):
                         'Reach': reach_val,         
                         'Impact': impact_val,       
                         'Confidence': conf_val_num, 
-                        'Тип': g_type
+                        'Тип': g_type,
+                        'Start date': "",
+                        'End date': ""
                     }]))
             
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
@@ -432,7 +472,9 @@ with st.form("main_form", clear_on_submit=True):
                         'Reach': reach_val,         
                         'Impact': impact_val,       
                         'Confidence': conf_val_num, 
-                        'Тип': g_type
+                        'Тип': g_type,
+                        'Start date': "",
+                        'End date': ""
                     }]))
 
             if priority == "P0 (Critical)":
@@ -449,7 +491,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные сохранены! Формулы RICE автоматически добавлены в таблицу.")
+            st.success("Данные и даты успешно сохранены!")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
