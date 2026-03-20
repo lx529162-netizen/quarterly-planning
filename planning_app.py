@@ -116,7 +116,6 @@ def sync_jira_sheet(client, df_source):
     df_jira = pd.DataFrame()
     df_jira['Summary'] = df_active['Название задачи']
     
-    # Добавили даты в описание для Jira
     df_jira['Description'] = df_active['Описание'] + "\n\n" + \
                              "--- Planning Info ---\n" + \
                              "Author: " + df_active['Кто создал задачу'] + "\n" + \
@@ -188,7 +187,6 @@ def load_data():
     sheet = get_main_sheet()
     raw_data = sheet.get_all_values()
     
-    # Добавлены Start date и End date
     expected_cols = ['Берем', 'Название задачи', 'Описание', 'Кто создал задачу', 'Исполнитель', 'Заказчик', 'Приоритет', 'RICE', 'Оценка (SP)', 'Reach', 'Impact', 'Confidence', 'Тип', 'Start date', 'End date']
     
     if not raw_data:
@@ -196,7 +194,6 @@ def load_data():
         return pd.DataFrame(columns=expected_cols)
 
     if raw_data[0] != expected_cols:
-        # Обновляем заголовки до колонки O (15-я колонка)
         sheet.update(range_name='A1:O1', values=[expected_cols])
         raw_data = sheet.get_all_values()
 
@@ -395,7 +392,6 @@ with st.form("main_form", clear_on_submit=True):
 
             sp_val = int(estimate)
 
-            # Логика расчета дат в зависимости от того, что ввел пользователь
             if start_date_input is None and end_date_input is None:
                 final_start = next_month_start
                 final_end = final_start + datetime.timedelta(days=sp_val)
@@ -409,7 +405,6 @@ with st.form("main_form", clear_on_submit=True):
                 final_start = start_date_input
                 final_end = end_date_input
 
-            # Форматируем в строку (YYYY-MM-DD) для Гугл Таблицы
             str_start = final_start.strftime("%Y-%m-%d")
             str_end = final_end.strftime("%Y-%m-%d")
 
@@ -434,7 +429,7 @@ with st.form("main_form", clear_on_submit=True):
                 'End date': str_end
             }]))
             
-            # Зависимости (Даты оставляем пустыми, так как планировать их будет другая команда)
+            # Зависимость 1 (Дедлайн для блокера/энейблера = старт нашей задачи)
             if dep1_team != "(Нет зависимости)" and dep1_team != main_team:
                 if dep1_name:
                     g_type = "Incoming Blocker" if dep1_type == "Блокер" else "Incoming Enabler"
@@ -453,9 +448,10 @@ with st.form("main_form", clear_on_submit=True):
                         'Confidence': conf_val_num, 
                         'Тип': g_type,
                         'Start date': "",
-                        'End date': ""
+                        'End date': str_start # Установили дедлайн равный дате старта основной задачи!
                     }]))
             
+            # Зависимость 2 (Дедлайн для блокера/энейблера = старт нашей задачи)
             if dep2_team != "(Нет зависимости)" and dep2_team != main_team:
                 if dep2_name:
                     g_type = "Incoming Blocker" if dep2_type == "Блокер" else "Incoming Enabler"
@@ -474,7 +470,7 @@ with st.form("main_form", clear_on_submit=True):
                         'Confidence': conf_val_num, 
                         'Тип': g_type,
                         'Start date': "",
-                        'End date': ""
+                        'End date': str_start # Установили дедлайн равный дате старта основной задачи!
                     }]))
 
             if priority == "P0 (Critical)":
@@ -491,7 +487,7 @@ with st.form("main_form", clear_on_submit=True):
                     st.rerun()
             
             save_rows(rows_to_save)
-            st.success("Данные и даты успешно сохранены!")
+            st.success("Данные и даты успешно сохранены! (Зависимости получили дедлайн)")
             st.rerun()
 
 # АНАЛИТИКА (ГРАФИКИ)
